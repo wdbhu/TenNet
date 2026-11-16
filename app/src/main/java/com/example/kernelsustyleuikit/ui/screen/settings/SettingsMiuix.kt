@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FontDownload
 import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Update
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +51,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.example.kernelsustyleuikit.BuildConfig
 import com.example.kernelsustyleuikit.R
 import com.example.kernelsustyleuikit.ui.UiMode
 import com.example.kernelsustyleuikit.ui.component.dialog.rememberLoadingDialog
@@ -134,6 +136,9 @@ fun SettingPagerMiuix(
                             onCheckedChange = actions.onSetCheckUpdate
                         )
                     }
+
+                    // 立即检查更新
+                    CheckNowCard(uiState, actions)
 
 
                     Card(
@@ -246,5 +251,54 @@ fun SettingPagerMiuix(
                 }
             }
         }
+    }
+}
+
+/** 「立即检查」卡片：点击触发一次检查，状态直接显示在副标题里。 */
+@Composable
+private fun CheckNowCard(
+    state: SettingsUiState,
+    actions: SettingsScreenActions,
+) {
+    val checking = state.checkState == 1
+    Card(
+        modifier = Modifier
+            .padding(top = 12.dp)
+            .fillMaxWidth(),
+    ) {
+        ArrowPreference(
+            title = stringResource(id = R.string.settings_check_now),
+            summary = when (state.checkState) {
+                1 -> stringResource(id = R.string.settings_check_state_checking)
+                2 -> stringResource(
+                    id = R.string.settings_check_state_latest,
+                    state.remoteVersionName.ifBlank {
+                        BuildConfig.VERSION_NAME
+                    }
+                )
+                3 -> stringResource(id = R.string.settings_check_state_new, state.remoteVersionName)
+                4 -> stringResource(id = R.string.settings_check_state_failed)
+                else -> stringResource(
+                    id = R.string.settings_check_state_current,
+                    "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+                )
+            },
+            startAction = {
+                Icon(
+                    Icons.Rounded.Refresh,
+                    modifier = Modifier.padding(end = 6.dp),
+                    contentDescription = stringResource(id = R.string.settings_check_now),
+                    tint = colorScheme.onBackground
+                )
+            },
+            onClick = {
+                if (checking) return@ArrowPreference
+                if (state.checkState == 3 && state.updateDownloadUrl.isNotBlank()) {
+                    actions.onDownloadUpdate(state.updateDownloadUrl)
+                } else {
+                    actions.onCheckUpdateNow()
+                }
+            }
+        )
     }
 }
