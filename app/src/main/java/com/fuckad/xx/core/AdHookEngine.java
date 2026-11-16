@@ -51,6 +51,21 @@ public final class AdHookEngine {
      */
     private static final java.util.Map<String, Object[]> sRealRewardArgs =
             new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * 按「参数类型」共享的真实回调对象。
+     *
+     * TopOn 这类聚合层会把同一个广告回调分发给多个监听器（SDK 内部适配层 + App 自己的监听器），
+     * 前者能拿到真实 ATAdInfo，后者在百度/快手源下可能收到 null。
+     * 这里把见过的真实对象按类型存一份，后续谁收到 null 就用它顶上。
+     */
+    /**
+     * 按类型缓存真实回调对象。
+     *
+     * 必须用弱引用：广告对象（ATAdInfo 等）动辄持有素材 URL、大段 JSON，
+     * 强引用会把每轮广告的对象都留在内存里，刷几十次广告就是几十 MB。
+     */
+    private static final java.util.Map<Class<?>, java.lang.ref.WeakReference<Object>> sRealArgByType =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Class<?>, java.lang.ref.WeakReference<Object>>());
     private static final java.util.Map<Class<?>, Method> sRewardMethods = new java.util.HashMap<>();
     private static final java.util.Set<Class<?>> sCtorHooked = new java.util.HashSet<>();
     private static volatile long sLastFireAt;
@@ -128,6 +143,26 @@ public final class AdHookEngine {
     public AdHookEngine(XposedInterface xi) {
         this.xi = xi;
         sEngine = this;
+        // 让 ArgFixer 在遇到 null 对象参数时能取到同轮广告的真实对象
+        ArgFixer.setRealArgSource(new ArgFixer.RealArgSource() {
+            @Override
+            public Object find(Class<?> type) {
+                java.lang.ref.WeakReference<Object> ref = sRealArgByType.get(type);
+                Object direct = ref == null ? null : ref.get();
+                if (direct != null) return direct;
+                // 退一步：找兼容子类型（接口/父类）
+                synchronized (sRealArgByType) {
+                    for (java.util.Map.Entry<Class<?>, java.lang.ref.WeakReference<Object>> e
+                            : sRealArgByType.entrySet()) {
+                        if (type.isAssignableFrom(e.getKey())) {
+                            Object v = e.getValue() == null ? null : e.getValue().get();
+                            if (v != null) return v;
+                        }
+                    }
+                }
+                return null;
+            }
+        });
     }
 
     /** 扫描结果，交给主线程去装 hook。 */
@@ -677,15 +712,26 @@ public final class AdHookEngine {
                                 // 避免自造空壳参数被 App 读字段 NPE
                                 if (original != null && original.length > 0) {
                                     sRealRewardArgs.put(key, original.clone());
+                                    // 同时按类型记一份：同一次广告的多个监听器共享同一个真实对象
+                                    for (Object arg : original) {
+                                        if (arg != null) {
+                                            sRealArgByType.put(arg.getClass(),
+                                                    new java.lang.ref.WeakReference<>(arg));
+                                        }
+                                    }
                                 }
-                                // 不修改档：真实回调参数原样透传，不做任何重写
-                                if (Config.rewardPassthrough() && Logs.isEnabled()) {
+                                // 不修改档：不重写 boolean/int，但 null 的对象参数必须补
+                                // （TopOn 在百度/快手源下 ATAdInfo 传 null，App 侧是 Kotlin
+                                //   非空参数，直接 NPE，奖励就到不了账）
+                                final boolean passthrough = Config.rewardPassthrough();
+                                if (passthrough && Logs.isEnabled()) {
                                     Logs.d("奖励回调原样放行(倍率不动，仅 1 次): " + key);
                                 }
-                                Object[] fixed = Config.rewardPassthrough()
-                                        ? null : ArgFixer.fixRewardArgs(types, original);
+                                Object[] fixed = passthrough
+                                        ? ArgFixer.fillNullArgs(types, original)
+                                        : ArgFixer.fixRewardArgs(types, original);
                                 Object result = fixed != null ? chain.proceed(fixed) : chain.proceed();
-                                if (!Config.rewardPassthrough()) {
+                                if (!passthrough) {
                                     multiplyNaturalReward(self, method, fixed, original);
                                 }
                                 return result;
