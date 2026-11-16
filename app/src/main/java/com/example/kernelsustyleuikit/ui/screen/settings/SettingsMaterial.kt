@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.ContactPage
 import androidx.compose.material.icons.filled.FontDownload
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeFlexibleTopAppBar
@@ -38,6 +39,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.example.kernelsustyleuikit.BuildConfig
 import com.example.kernelsustyleuikit.R
 import com.example.kernelsustyleuikit.ui.UiMode
 import com.example.kernelsustyleuikit.ui.component.material.SegmentedColumn
@@ -84,6 +86,56 @@ fun SettingPagerMaterial(
                         summary = stringResource(id = R.string.settings_check_update_summary),
                         checked = uiState.checkUpdate,
                         onCheckedChange = actions.onSetCheckUpdate
+                    )
+                }
+            )
+
+            // 立即检查更新
+            SegmentedColumn(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                content = listOf {
+                    val checking = uiState.checkState == 1
+                    SegmentedListItem(
+                        selected = false,
+                        onClick = {
+                            if (!checking) {
+                                if (uiState.checkState == 3 && uiState.updateDownloadUrl.isNotBlank()) {
+                                    actions.onDownloadUpdate(uiState.updateDownloadUrl)
+                                } else {
+                                    actions.onCheckUpdateNow()
+                                }
+                            }
+                        },
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        headlineContent = {
+                            Text(stringResource(id = R.string.settings_check_now))
+                        },
+                        supportingContent = {
+                            Text(
+                                when (uiState.checkState) {
+                                    1 -> stringResource(id = R.string.settings_check_state_checking)
+                                    2 -> stringResource(
+                                        id = R.string.settings_check_state_latest,
+                                        uiState.remoteVersionName.ifBlank { BuildConfig.VERSION_NAME }
+                                    )
+                                    3 -> stringResource(
+                                        id = R.string.settings_check_state_new,
+                                        uiState.remoteVersionName
+                                    )
+                                    4 -> stringResource(id = R.string.settings_check_state_failed)
+                                    else -> stringResource(
+                                        id = R.string.settings_check_state_current,
+                                        "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+                                    )
+                                }
+                            )
+                        }
                     )
                 }
             )
