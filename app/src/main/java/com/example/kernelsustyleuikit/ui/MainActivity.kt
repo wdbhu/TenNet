@@ -1,5 +1,6 @@
 package com.example.kernelsustyleuikit.ui
 
+import android.os.Build
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Bundle
@@ -127,7 +128,11 @@ class MainActivity : ComponentActivity() {
                 LocalDensity provides density,
                 LocalColorMode provides appSettings.colorMode.value,
                 LocalEnableBlur provides uiState.enableBlur,
-                LocalEnableFloatingBottomBar provides uiState.enableFloatingBottomBar,
+                // Android 13 以下不支持 miuix-blur，浮动底栏依赖它，这里强制关闭避免崩溃
+                LocalEnableFloatingBottomBar provides (
+                    uiState.enableFloatingBottomBar &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ),
                 LocalEnableFloatingBottomBarBlur provides uiState.enableFloatingBottomBarBlur,
                 LocalUiMode provides uiMode,
             ) {
@@ -223,9 +228,15 @@ fun MainScreen(
     }
     val blurBackdrop = rememberBlurBackdrop(enableBlur)
 
-    val backdrop = rememberLayerBackdrop {
-        drawRect(surfaceColor)
-        drawContent()
+    // miuix-blur 依赖 API 33+ 的 RuntimeShader。低版本调用 rememberLayerBackdrop
+    // 会 NoClassDefFoundError 直接崩，这里做版本判断。
+    val backdrop = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        rememberLayerBackdrop {
+            drawRect(surfaceColor)
+            drawContent()
+        }
+    } else {
+        null
     }
 
     val settledPage = mainPagerState.pagerState.settledPage
@@ -249,7 +260,7 @@ fun MainScreen(
                 HorizontalPager(
                     modifier = Modifier
                         .pagerGestureOverride(pagerState = mainPagerState.pagerState, mode = pagerMode)
-                        .then(if (enableFloatingBottomBar && enableFloatingBottomBarBlur) Modifier.layerBackdrop(backdrop) else Modifier),
+                        .then(if (enableFloatingBottomBar && enableFloatingBottomBarBlur && backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier),
                     state = mainPagerState.pagerState,
                     beyondViewportPageCount = if (contentReady) 1 else 0,
                     overscrollEffect = null,
