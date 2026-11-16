@@ -151,6 +151,34 @@ class SettingsViewModel(
         _uiState.update { it.copy(colorSpec = spec) }
     }
 
+    /**
+     * 立即检查更新。
+     *
+     * checkState: 0=未检查 1=检查中 2=已是最新 3=有新版本 4=失败
+     */
+    fun checkUpdateNow() {
+        if (_uiState.value.checkState == 1) return
+        _uiState.update { it.copy(checkState = 1) }
+        viewModelScope.launch {
+            val info = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.example.kernelsustyleuikit.ui.util.checkNewVersion()
+            }
+            val current = com.example.kernelsustyleuikit.BuildConfig.VERSION_CODE
+            val state = when {
+                info.versionCode <= 0 -> 4                 // 请求失败或解析不到
+                info.versionCode > current -> 3            // 有新版本
+                else -> 2                                  // 已是最新
+            }
+            _uiState.update {
+                it.copy(
+                    checkState = state,
+                    remoteVersionName = info.versionName,
+                    updateDownloadUrl = info.downloadUrl,
+                )
+            }
+        }
+    }
+
     fun setEnablePredictiveBack(enabled: Boolean) {
         repo.enablePredictiveBack = enabled
         _uiState.update { it.copy(enablePredictiveBack = enabled) }
