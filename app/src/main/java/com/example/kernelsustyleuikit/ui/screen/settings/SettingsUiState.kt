@@ -22,6 +22,14 @@ data class SettingsUiState(
     val enableFloatingBottomBarBlur: Boolean = true,
     val pageScale: Float = 1.0f,
 
+    // ---- 立即检查更新 ----
+    /** 检查进度：0=未检查 1=检查中 2=已是最新 3=有新版本 4=检查失败 */
+    val checkState: Int = 0,
+    /** 远端版本显示用，例如 "7.18" */
+    val remoteVersionName: String = "",
+    /** 有新版本时的下载地址 */
+    val updateDownloadUrl: String = "",
+
     // ---- TunNet 激励视频拦截 ----
     val tnEnabled: Boolean = true,
     val tnInjectOnSkip: Boolean = true,
@@ -43,6 +51,10 @@ data class SettingsScreenActions(
     val onSetUiModeIndex: (Int) -> Unit,
     val onOpenAbout: () -> Unit,
     val onOpenDonate: () -> Unit = {},
+
+    // ---- 立即检查更新 ----
+    val onCheckUpdateNow: () -> Unit = {},
+    val onDownloadUpdate: (String) -> Unit = {},
 
     // ---- TunNet ----
     val onSetTnEnabled: (Boolean) -> Unit = {},
