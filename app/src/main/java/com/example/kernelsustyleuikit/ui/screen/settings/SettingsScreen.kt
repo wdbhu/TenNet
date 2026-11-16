@@ -17,6 +17,7 @@ fun SettingPager(
     navigator: Navigator,
     bottomInnerPadding: Dp
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val viewModel = viewModel<SettingsViewModel>()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -39,6 +40,19 @@ fun SettingPager(
         onSetTnAutoClose = viewModel::setTnAutoClose,
         onSetTnRiskBypass = viewModel::setTnRiskBypass,
         onSetTnRewardMultiplier = viewModel::setTnRewardMultiplier,
+        onCheckUpdateNow = viewModel::checkUpdateNow,
+        onDownloadUpdate = { url ->
+            if (url.isNotBlank()) {
+                runCatching {
+                    context.startActivity(
+                        android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(url)
+                        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            }
+        },
     )
 
     when (LocalUiMode.current) {
