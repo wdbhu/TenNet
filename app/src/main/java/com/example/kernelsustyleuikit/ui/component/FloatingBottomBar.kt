@@ -2,6 +2,7 @@
 
 package com.example.kernelsustyleuikit.ui.component
 
+import android.os.Build
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.spring
@@ -190,7 +191,14 @@ fun FloatingBottomBar(
     val surfaceContainer = MiuixTheme.colorScheme.surfaceContainer
     val containerColor = if (isBlurEnabled) surfaceContainer.copy(0.4f) else surfaceContainer
 
-    val tabsBackdrop = rememberLayerBackdrop()
+    // miuix-blur 要求 API 33+（Android 13）。低版本上 rememberLayerBackdrop 内部会
+    // 引用 RuntimeShader / RenderEffect 等新 API，直接调用会 NoClassDefFoundError 崩掉。
+    // 这里用 SDK 判断，低版本传 null，后续所有 layerBackdrop 调用处都已判断 null。
+    val tabsBackdrop = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        rememberLayerBackdrop()
+    } else {
+        null
+    }
     val density = LocalDensity.current
     val isLtr = LocalLayoutDirection.current == LayoutDirection.Ltr
     val animationScope = rememberCoroutineScope()
@@ -274,23 +282,34 @@ fun FloatingBottomBar(
         }
     }
 
-    val interactiveHighlight = remember(animationScope, tabWidthPx) {
-        InteractiveHighlight(
-            animationScope = animationScope,
-            position = { size, _ ->
-                Offset(
-                    if (isLtr) (dampedDragAnimation.value + 0.5f) * tabWidthPx + panelOffset
-                    else size.width - (dampedDragAnimation.value + 0.5f) * tabWidthPx + panelOffset,
-                    size.height / 2f
-                )
-            }
-        )
+    // InteractiveHighlight 在字段初始化里就 new 了 android.graphics.RuntimeShader（API 33+），
+    // 低版本实例化即崩。这里限制在 33+ 才创建。
+    val interactiveHighlight = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        remember(animationScope, tabWidthPx) {
+            InteractiveHighlight(
+                animationScope = animationScope,
+                position = { size, _ ->
+                    Offset(
+                        if (isLtr) (dampedDragAnimation.value + 0.5f) * tabWidthPx + panelOffset
+                        else size.width - (dampedDragAnimation.value + 0.5f) * tabWidthPx + panelOffset,
+                        size.height / 2f
+                    )
+                }
+            )
+        }
+    } else {
+        null
     }
 
     val baseHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = -45f)
     val pillHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = 90f)
 
-    val combinedBackdrop = rememberCombinedBackdrop(backdrop, tabsBackdrop)
+    // tabsBackdrop 在低版本为 null，这里避免把 null 传给非空参数
+    val combinedBackdrop = if (tabsBackdrop != null) {
+        rememberCombinedBackdrop(backdrop, tabsBackdrop)
+    } else {
+        null
+    }
 
     Box(
         modifier = modifier.width(IntrinsicSize.Min),
@@ -343,7 +362,7 @@ fun FloatingBottomBar(
                         Modifier.background(containerColor, pillShape)
                     }
                 )
-                .then(if (isBlurEnabled) interactiveHighlight.modifier else Modifier)
+                .then(if (isBlurEnabled && interactiveHighlight != null) interactiveHighlight.modifier else Modifier)
                 .height(64.dp)
                 .padding(4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -360,7 +379,7 @@ fun FloatingBottomBar(
                     Modifier
                         .clearAndSetSemantics {}
                         .alpha(0f)
-                        .layerBackdrop(tabsBackdrop)
+                        .then(if (tabsBackdrop != null) Modifier.layerBackdrop(tabsBackdrop) else Modifier)
                         .graphicsLayer { translationX = panelOffset }
                         .drawBackdrop(
                             backdrop = backdrop,
@@ -375,7 +394,7 @@ fun FloatingBottomBar(
                             },
                             onDrawSurface = { drawRect(containerColor) },
                         )
-                        .then(interactiveHighlight.modifier)
+                        .then(interactiveHighlight?.modifier ?: Modifier)
                         .height(56.dp)
                         .padding(horizontal = 4.dp)
                         .graphicsLayer(colorFilter = ColorFilter.tint(accentColor)),
@@ -387,7 +406,7 @@ fun FloatingBottomBar(
 
         if (tabWidthPx > 0f) {
             val tabWidthDp = with(density) { tabWidthPx.toDp() }
-            if (isBlurEnabled) {
+            if (isBlurEnabled && combinedBackdrop != null) {
                 Box(
                     Modifier
                         .padding(horizontal = 4.dp)
@@ -395,7 +414,7 @@ fun FloatingBottomBar(
                             val progressOffset = dampedDragAnimation.value * tabWidthPx
                             translationX = if (isLtr) progressOffset + panelOffset else -progressOffset + panelOffset
                         }
-                        .then(interactiveHighlight.gestureModifier)
+                        .then(interactiveHighlight?.gestureModifier ?: Modifier)
                         .then(dampedDragAnimation.modifier)
                         .drawBackdrop(
                             backdrop = combinedBackdrop,
