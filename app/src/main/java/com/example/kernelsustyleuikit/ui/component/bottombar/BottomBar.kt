@@ -111,7 +111,7 @@ fun useNavigationRail(enableFloatingBottomBar: Boolean): Boolean {
 @Composable
 fun BottomBar(
     blurBackdrop: LayerBackdrop?,
-    backdrop: Backdrop,
+    backdrop: Backdrop?,
     modifier: Modifier = Modifier,
 ) {
     when (LocalUiMode.current) {
