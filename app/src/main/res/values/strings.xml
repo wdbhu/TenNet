@@ -38,6 +38,12 @@
     <string name="send_log">Send logs</string>
     <string name="settings_check_update">Check for updates</string>
     <string name="settings_check_update_summary">Automatically check for updates when opening the app.</string>
+    <string name="settings_check_now">Check now</string>
+    <string name="settings_check_state_checking">Checking…</string>
+    <string name="settings_check_state_latest">Up to date (current %1$s)</string>
+    <string name="settings_check_state_new">New version %1$s available, tap to download</string>
+    <string name="settings_check_state_failed">Check failed, please check network</string>
+    <string name="settings_check_state_current">Current %1$s</string>
     <string name="new_version_available">New version %1$s is available, click to upgrade!</string>
     <string name="update_changelog">Changelog</string>
     <string name="update">Update</string>
