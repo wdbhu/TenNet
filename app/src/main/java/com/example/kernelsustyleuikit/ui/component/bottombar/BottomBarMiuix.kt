@@ -40,7 +40,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 fun BottomBarMiuix(
     blurBackdrop: LayerBackdrop?,
-    backdrop: Backdrop,
+    backdrop: Backdrop?,
     modifier: Modifier,
 ) {
     val mainState = LocalMainPagerState.current
@@ -53,7 +53,7 @@ fun BottomBarMiuix(
             icon = destination.icon,
         )
     }
-    if (!enableFloatingBottomBar) {
+    if (!enableFloatingBottomBar || backdrop == null) {
         BlurredBar(blurBackdrop) {
             NavigationBar(
                 modifier = modifier,
