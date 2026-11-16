@@ -11,5 +11,5 @@ extra["androidCompileSdkVersionMinor"] = 0
 extra["androidBuildToolsVersion"] = "37.0.0"
 extra["androidSourceCompatibility"] = JavaVersion.VERSION_21
 extra["androidTargetCompatibility"] = JavaVersion.VERSION_21
-extra["managerVersionCode"] = 718
-extra["managerVersionName"] = "7.18"
+extra["managerVersionCode"] = 719
+extra["managerVersionName"] = "7.19"
