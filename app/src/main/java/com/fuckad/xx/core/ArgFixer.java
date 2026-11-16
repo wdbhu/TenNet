@@ -2,6 +2,8 @@ package com.fuckad.xx.core;
 
 import android.os.Bundle;
 
+import com.fuckad.xx.Logs;
+
 import java.lang.reflect.Array;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -36,6 +38,17 @@ public final class ArgFixer {
     };
 
     private static final Map<Class<?>, Boolean> PROVIDABLE = new ConcurrentHashMap<>();
+
+    /** 真实回调对象的提供者（由 AdHookEngine 注入），用于把 null 参数替换成真实对象。 */
+    public interface RealArgSource {
+        Object find(Class<?> type);
+    }
+
+    private static volatile RealArgSource sRealArgSource;
+
+    public static void setRealArgSource(RealArgSource source) {
+        sRealArgSource = source;
+    }
 
     private static volatile boolean sUnsafeTried;
     private static volatile Object sUnsafe;
@@ -126,6 +139,51 @@ public final class ArgFixer {
      *
      * @return 需要替换的新数组；没有改动时原样返回
      */
+    /**
+     * 只补 null 的对象参数，其余一律不动。
+     *
+     * 用于「不修改档」（倍率=1）：不能重写 boolean/int，但对象参数为 null 时
+     * 目标方法是 Kotlin 非空参数会直接 NPE，必须补一个能用的实例，否则奖励到不了账。
+     *
+     * @return 需要替换的新数组；没有 null 参数时返回 null（调用方原样 proceed）
+     */
+    public static Object[] fillNullArgs(Class<?>[] types, Object[] args) {
+        if (types == null || types.length == 0) return null;
+        Object[] out = args;
+        boolean copied = false;
+        for (int i = 0; i < types.length; i++) {
+            Class<?> type = types[i];
+            if (type.isPrimitive()) continue;
+            Object current = args != null && i < args.length ? args[i] : null;
+            if (current != null) continue;
+
+            Object filled = null;
+            boolean real = false;
+            RealArgSource src = sRealArgSource;
+            if (src != null) {
+                try {
+                    filled = src.find(type);
+                    real = filled != null;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (filled == null) {
+                filled = defaultValue(type);
+            }
+            if (filled == null) continue;
+
+            if (!copied) {
+                out = copy(args, types.length);
+                copied = true;
+            }
+            out[i] = filled;
+            if (Logs.isEnabled()) {
+                Logs.d("补全 null 参数: " + type.getName() + (real ? "（用真实对象）" : "（用空壳）"));
+            }
+        }
+        return copied ? out : null;
+    }
+
     public static Object[] fixRewardArgs(Class<?>[] types, Object[] args) {
         if (types == null || types.length == 0) return null;
 
@@ -156,6 +214,29 @@ public final class ArgFixer {
                     && (type == int.class || type == Integer.class)) {
                 if (!(current instanceof Integer) || ((Integer) current) <= 0) {
                     replaced = 1;
+                }
+            } else if (current == null && !type.isPrimitive()) {
+                // 真实回调里对象参数为 null 的情况（典型：TopOn 在百度/快手源下 ATAdInfo 传 null，
+                // 而 App 侧监听器是 Kotlin 非空参数，直接 NPE，奖励就到不了账）。
+                // 优先复用同一轮广告里别的监听器收到过的真实对象，其次才造空壳。
+                Object filled = null;
+                boolean real = false;
+                RealArgSource src = sRealArgSource;
+                if (src != null) {
+                    try {
+                        filled = src.find(type);
+                        real = filled != null;
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (filled == null) {
+                    filled = defaultValue(type);
+                }
+                if (filled != null) {
+                    replaced = filled;
+                    if (Logs.isEnabled()) {
+                        Logs.d("补全 null 参数: " + type.getName() + (real ? "（用真实对象）" : "（用空壳）"));
+                    }
                 }
             }
 
