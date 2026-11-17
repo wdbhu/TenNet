@@ -122,6 +122,8 @@
     <string name="tunnet_reward_delay_summary">Delays only the show-callback reward; close-callback rewards immediately</string>
     <string name="tunnet_toast">Show toast</string>
     <string name="tunnet_toast_summary">Show a toast inside the target app when an ad is intercepted</string>
+    <string name="tunnet_fill_null">Fill null args</string>
+    <string name="tunnet_fill_null_desc">Substitute an instance when a reward callback receives null. Some mediators (e.g. TopOn with Baidu/Kuaishou) pass null and the reward is lost. Java apps may rely on null, so it is off by default.</string>
     <string name="tunnet_dedupe">Strict de-duplication</string>
     <string name="tunnet_dedupe_summary">Repeated reward callbacks within a short window are let through only once</string>
     <string name="tunnet_debug">Debug log</string>
