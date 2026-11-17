@@ -129,6 +129,46 @@ base {
  * LSPosed 认为模块没更新就不再重新加载，hook 永远不注入。
  * 这里在每次构建前把版本号同步进 module.prop，保持两处永远一致。
  */
+val modulePropFile = layout.projectDirectory.file("src/main/resources/META-INF/xposed/module.prop")
+
+val syncModulePropVersion by tasks.registering {
+    group = "build"
+    description = "把 Gradle 的 managerVersionName / managerVersionCode 同步进 module.prop"
+
+    val source = modulePropFile.asFile
+    // 在配置阶段就把值读出来，避免执行阶段访问 project 导致配置缓存失效
+    val targetVersionName = managerVersionName
+    val targetVersionCode = managerVersionCode
+
+    inputs.property("versionName", targetVersionName)
+    inputs.property("versionCode", targetVersionCode)
+    inputs.file(source)
+    outputs.file(source)
+
+    doLast {
+        if (!source.exists()) {
+            logger.warn("module.prop 不存在，跳过版本同步: ${source.absolutePath}")
+            return@doLast
+        }
+        val original = source.readText()
+        var updated = original
+            .replace(Regex("(?m)^version=.*$"), "version=v$targetVersionName")
+            .replace(Regex("(?m)^versionCode=.*$"), "versionCode=$targetVersionCode")
+        if (updated != original) {
+            source.writeText(updated)
+            logger.lifecycle("module.prop 已同步: v$targetVersionName ($targetVersionCode)")
+        } else {
+            logger.info("module.prop 已是 v$targetVersionName ($targetVersionCode)，无需改动")
+        }
+    }
+}
+
+// 所有会把 module.prop 打进 APK 的任务都依赖这个同步任务
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JavaResource") }
+    .configureEach { dependsOn(syncModulePropVersion) }
+tasks.matching { it.name == "preBuild" }
+    .configureEach { dependsOn(syncModulePropVersion) }
+
 
 
 dependencies {
