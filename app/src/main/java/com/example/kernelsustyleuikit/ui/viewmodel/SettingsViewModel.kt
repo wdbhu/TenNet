@@ -24,6 +24,11 @@ class SettingsViewModel(
     }
 
     fun refresh() {
+        // 每次进设置页重置「立即检查」结果：装机版本可能已经变了
+        // （用户刚下载安装完新版本回来，界面不该还挂着「发现新版本」）
+        if (_uiState.value.checkState != 1) {
+            _uiState.update { it.copy(checkState = 0) }
+        }
         viewModelScope.launch {
             val checkUpdate = repo.checkUpdate
             val themeMode = repo.themeMode
@@ -266,6 +271,11 @@ class SettingsViewModel(
         refreshTn()
     }
 
+    fun setTnFillNullArgs(v: Boolean) {
+        TunNetPrefs.writeFillNullArgs(v)
+        refreshTn()
+    }
+
     /** 从真实配置源回读，界面永远显示落盘后的值。 */
     private fun refreshTn() {
         val tn = TunNetPrefs.read()
@@ -281,6 +291,7 @@ class SettingsViewModel(
                 tnToast = tn.toast,
                 tnDedupe = tn.dedupe,
                 tnDebug = tn.debug,
+                tnFillNullArgs = tn.fillNullArgs,
             )
         }
     }
