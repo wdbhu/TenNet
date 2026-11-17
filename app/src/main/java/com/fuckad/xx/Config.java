@@ -31,6 +31,8 @@ public final class Config {
     public static final String KEY_LOCATION_SPOOF = "location_spoof";
     public static final String KEY_SPOOF_LOCATIONS = "spoof_locations";
     public static final String KEY_RISK_BYPASS = "risk_bypass";
+    /** 奖励回调里参数为 null 时是否补一个实例（默认关，出问题再开）。 */
+    public static final String KEY_FILL_NULL_ARGS = "fill_null_args";
     public static final String KEY_FP_RESETS = "fp_resets";
     public static final String KEY_RISK_APPS = "risk_apps";
 
@@ -51,6 +53,7 @@ public final class Config {
     private static volatile boolean sLocationSpoof = false;
     private static volatile Map<String, String[]> sLocations = java.util.Collections.emptyMap();
     private static volatile boolean sRiskBypass = true;
+    private static volatile boolean sFillNullArgs = false;
     private static volatile Map<String, Integer> sFpResets = java.util.Collections.emptyMap();
     private static volatile Set<String> sRiskApps = java.util.Collections.emptySet();
 
@@ -85,6 +88,7 @@ public final class Config {
                     : new HashSet<>(spoofApps);
             sLocationSpoof = sp.getBoolean(KEY_LOCATION_SPOOF, false);
             sRiskBypass = sp.getBoolean(KEY_RISK_BYPASS, true);
+            sFillNullArgs = sp.getBoolean(KEY_FILL_NULL_ARGS, false);
             sFpResets = parseResets(sp.getStringSet(KEY_FP_RESETS, null));
             Set<String> riskApps = sp.getStringSet(KEY_RISK_APPS, null);
             sRiskApps = riskApps == null
@@ -166,6 +170,11 @@ public final class Config {
         if (v < 1) v = 1;
         if (v > 10) v = 10;
         return v;
+    }
+
+    /** 奖励回调里对象参数为 null 时，是否补一个实例顶上去。 */
+    public static boolean fillNullArgs() {
+        return sFillNullArgs;
     }
 
     /** 单次透传：倍率为 1 时不重写回调参数、不放大数量。 */
