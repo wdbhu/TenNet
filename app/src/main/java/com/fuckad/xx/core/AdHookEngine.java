@@ -156,18 +156,49 @@ public final class AdHookEngine {
             else closes = new java.util.ArrayList<>(closes);
         }
         if (closes == null || closes.isEmpty()) return fired;
+
+        /*
+         * 结束回调必须按「看完 → 发奖 → 关闭」的顺序全部走一遍，不能只调第一个。
+         *
+         * 以前的写法是遍历到第一个能调起来的就 return，而 closeRank 把 onAdClose
+         * 排在最前，结果 onVideoComplete 永远不被触发。游戏侧的状态机要求
+         * 「视频播放完成」才会认这次奖励，光有 onReward 会被判成异常不发奖
+         * （实测日志：onAdClose 触发了，onVideoComplete 一次都没出现，奖励不到账）。
+         */
+        boolean any = false;
+        // 先「完成」类：onVideoComplete / onVideoEnd / onVideoSkipToEnd
         for (Method close : closes) {
-            try {
-                close.setAccessible(true);
-                close.invoke(target);
-                Logs.i("关闭前替 SDK 触发结束回调 " + close.getName()
-                        + " @ " + target.getClass().getName());
-                return true;
-            } catch (Throwable t) {
-                Logs.w("关闭前触发结束回调失败 " + close.getName() + ": " + t);
-            }
+            if (!isCompleteMethod(close.getName())) continue;
+            if (invokeClose(close, target)) any = true;
         }
-        return false;
+        // 再「关闭」类：onAdClose / onAdDismiss / onSkippedVideo
+        for (Method close : closes) {
+            if (isCompleteMethod(close.getName())) continue;
+            if (invokeClose(close, target)) any = true;
+        }
+        return fired || any;
+    }
+
+    /** 是否是「视频播放完成」这类回调（游戏发奖的前提条件）。 */
+    private static boolean isCompleteMethod(String name) {
+        return name.contains("onVideoComplete")
+                || name.contains("onVideoEnd")
+                || name.contains("onVideoSkipToEnd")
+                || name.contains("PlayEnd");
+    }
+
+    /** 调一个结束回调，失败只记日志。 */
+    private static boolean invokeClose(Method close, Object target) {
+        try {
+            close.setAccessible(true);
+            close.invoke(target);
+            Logs.i("关闭前替 SDK 触发结束回调 " + close.getName()
+                    + " @ " + target.getClass().getName());
+            return true;
+        } catch (Throwable t) {
+            Logs.w("关闭前触发结束回调失败 " + close.getName() + ": " + t);
+            return false;
+        }
     }
 
     /**
@@ -977,13 +1008,64 @@ public final class AdHookEngine {
                 sb.append(t.getClass().getName()).append(':').append(t.getMessage());
                 continue;
             }
-            try {
-                sb.append(String.valueOf(value));
-            } catch (Throwable t) {
-                sb.append("<toString 失败>");
-            }
+            // 广告 SDK 的错误对象基本都不重写 toString()，
+            // 例如 com.qq.e.comm.util.AdError 打出来只有 "AdError@6522f57"，
+            // 拿不到错误码等于没记。这里用反射把常见取值方法读出来。
+            String detail = describeObject(value);
+            sb.append(detail != null ? detail : safeToString(value));
         }
         return sb.toString();
+    }
+
+    /**
+     * 反射读对象的常用字段/方法，拼成可读文本。
+     *
+     * <p>错误对象、结果对象通常是混淆过的，没有 toString()。
+     * 依次尝试 getErrorCode / getCode / getErrorMsg / getMessage / getMsg 等命名，
+     * 任意一个取到值就返回。</p>
+     */
+    private static String describeObject(Object value) {
+        if (value == null) return null;
+        Class<?> clazz = value.getClass();
+        String[] codeNames = {"getErrorCode", "getCode", "getErrCode", "getErrorNo"};
+        String[] msgNames = {"getErrorMsg", "getMessage", "getMsg",
+                "getErrorString", "getDesc", "getDescription"};
+
+        Object code = invokeNoArg(clazz, value, codeNames);
+        Object msg = invokeNoArg(clazz, value, msgNames);
+        if (code == null && msg == null) return null;
+
+        StringBuilder sb = new StringBuilder();
+        if (code != null) sb.append("code=").append(safeToString(code));
+        if (msg != null) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append("msg=").append(safeToString(msg));
+        }
+        return sb.toString();
+    }
+
+    private static Object invokeNoArg(Class<?> clazz, Object target, String[] names) {
+        for (String name : names) {
+            try {
+                Method m = clazz.getMethod(name);
+                if (m.getParameterCount() != 0) continue;
+                m.setAccessible(true);
+                Object result = m.invoke(target);
+                if (result == null) continue;
+                String text = String.valueOf(result);
+                if (!text.isEmpty()) return result;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static String safeToString(Object value) {
+        try {
+            return String.valueOf(value);
+        } catch (Throwable t) {
+            return "<toString 失败>";
+        }
     }
 
     private static String simpleName(Class<?> type) {
