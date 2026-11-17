@@ -916,6 +916,7 @@ public final class AdHookEngine {
         return false;
     }
 
+
     /**
      * 取本轮广告的真实回调参数。
      *
@@ -1269,6 +1270,10 @@ public final class AdHookEngine {
     /** 广告被跳过/关闭后，主动调一次奖励回调。 */
     private void deliver(Rules.Rule rule, Object self, Object[] triggerArgs) {
         if (self == null || !rule.deliverOnTrigger || !Config.injectOnSkip()) return;
+
+        // 方案 B（只触发 onVideoComplete、不手动发奖）会导致 TopOn 内部 NPE 闪退，
+        // 见 VideoHelper$1$13.run(VideoHelper.java:271) —— 它要 toString() 一个
+        // 只在真实播放时才会生成的 ATAdInfo，客户端伪造不出来。已回滚到手动补发。
         if (Logs.isEnabled()) {
             Logs.d("准备补发: " + rule.sdk + " 实例=" + RewardLedger.describe(self));
         }
