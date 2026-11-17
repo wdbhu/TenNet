@@ -41,6 +41,7 @@ data class SettingsUiState(
     val tnToast: Boolean = true,
     val tnDedupe: Boolean = true,
     val tnDebug: Boolean = true,
+    val tnFillNullArgs: Boolean = false,
 )
 
 @Immutable
@@ -62,4 +63,5 @@ data class SettingsScreenActions(
     val onSetTnAutoClose: (Boolean) -> Unit = {},
     val onSetTnRiskBypass: (Boolean) -> Unit = {},
     val onSetTnRewardMultiplier: (Int) -> Unit = {},
+    val onSetTnFillNullArgs: (Boolean) -> Unit = {},
 )
