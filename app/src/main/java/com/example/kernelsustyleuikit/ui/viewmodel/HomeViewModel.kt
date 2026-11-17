@@ -90,7 +90,18 @@ class HomeViewModel : ViewModel() {
             latestVersionInfo = LatestVersionInfo(),
             currentAppVersionCode = appVersion.versionCode,
             xposed = XposedStatusProvider.status.value,
-            adaptedCount = runCatching { com.fuckad.xx.core.Rules.all().size }.getOrDefault(0),
+            // 统计的是「真实支持的 SDK 家数」，不是规则条数。
+            // 规则表里同一家 SDK 常常有多条规则（CSJ / CSJ-Feed、GDT / GDT-Reward、
+            // ADMOB / ADMOB-Legacy 等），而「xxx-加载」这类只挂错误回调记日志的规则
+            // 也不提供发奖能力，都不该计入。
+            adaptedCount = runCatching {
+                com.fuckad.xx.core.Rules.all()
+                    .asSequence()
+                    .filter { it.rewardNames.isNotEmpty() }
+                    .map { it.sdk.substringBefore('-') }
+                    .distinct()
+                    .count()
+            }.getOrDefault(0),
             // 必须和应用页的勾选状态同源：勾选走 root 直写 LSPosed 数据库，
             // 而 XposedService.scope 是服务端缓存，两者可能短暂不同步。
             // 以前这里优先读 service.scope，会出现「首页已启用 1、应用页全没勾」。
