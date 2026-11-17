@@ -120,6 +120,8 @@
     <string name="tunnet_reward_delay_summary">只延迟展示回调的补发；关闭回调会立即补发</string>
     <string name="tunnet_toast">显示提示</string>
     <string name="tunnet_toast_summary">拦截成功时在目标 App 里弹一条 Toast</string>
+    <string name="tunnet_fill_null">修复空参数</string>
+    <string name="tunnet_fill_null_desc">奖励回调参数为 null 时补一个实例。部分聚合广告（如 TopOn 在百度/快手源下）会传 null，导致奖励不到账；Java App 的 null 可能有业务含义，默认关闭，遇到奖励不到账再打开</string>
     <string name="tunnet_dedupe">严格去重</string>
     <string name="tunnet_dedupe_summary">短时间内重复的奖励回调只放行一次，避免发放两次</string>
     <string name="tunnet_debug">调试日志</string>
