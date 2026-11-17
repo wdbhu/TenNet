@@ -147,6 +147,47 @@ public final class ArgFixer {
      *
      * @return 需要替换的新数组；没有 null 参数时返回 null（调用方原样 proceed）
      */
+    /** 缓存「这个类是不是 Kotlin 编译产物」。 */
+    private static final Map<Class<?>, Boolean> KOTLIN_CLASS = new ConcurrentHashMap<>();
+
+    /**
+     * 这个类是不是 Kotlin 编译出来的。
+     *
+     * <p>Kotlin 编译器会给每个类加一个 {@code @kotlin.Metadata} 注解。
+     * Kotlin 的「非空参数」检查是编译期插入 {@code Intrinsics.checkNotNullParameter}，
+     * 运行时一旦收到 null 就直接抛 NPE —— 这才是需要补 null 的场景。</p>
+     *
+     * <p>Java 写的监听器没有这个注解，它们的 null 往往有业务含义（比如区分
+     * 「没有广告信息」），补了反而会走错分支。所以只对 Kotlin 类补。</p>
+     */
+    public static boolean isKotlinClass(Class<?> clazz) {
+        if (clazz == null) return false;
+        Boolean cached = KOTLIN_CLASS.get(clazz);
+        if (cached != null) return cached;
+        boolean kotlin = false;
+        try {
+            for (java.lang.annotation.Annotation ann : clazz.getAnnotations()) {
+                if ("kotlin.Metadata".equals(ann.annotationType().getName())) {
+                    kotlin = true;
+                    break;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        KOTLIN_CLASS.put(clazz, kotlin);
+        return kotlin;
+    }
+
+    /**
+     * 只补 null 的对象参数，其余一律不动；且仅当目标方法声明类为 Kotlin 类时才补。
+     *
+     * @param owner 目标方法所在的类，用来判断是不是 Kotlin
+     */
+    public static Object[] fillNullArgsForKotlin(Class<?> owner, Class<?>[] types, Object[] args) {
+        if (!isKotlinClass(owner)) return null;
+        return fillNullArgs(types, args);
+    }
+
     public static Object[] fillNullArgs(Class<?>[] types, Object[] args) {
         if (types == null || types.length == 0) return null;
         Object[] out = args;
