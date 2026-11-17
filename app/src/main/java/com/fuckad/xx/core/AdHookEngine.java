@@ -570,12 +570,15 @@ public final class AdHookEngine {
                 String name = entry.getKey();
                 boolean reward = rule.isReward(name);
                 boolean trigger = rule.isTrigger(name);
-                if (!reward && !trigger) continue;
+                boolean error = rule.isError(name);
+                if (!reward && !trigger && !error) continue;
                 for (Method method : entry.getValue()) {
                     if (reward) {
                         if (installReward(rule, method)) hits++;
-                    } else if (installTrigger(rule, method)) {
-                        hits++;
+                    } else if (trigger) {
+                        if (installTrigger(rule, method)) hits++;
+                    } else if (error) {
+                        if (installError(rule, method)) hits++;
                     }
                 }
             }
@@ -815,6 +818,77 @@ public final class AdHookEngine {
         return key.contains("onAdClose") || key.contains("onADClose")
                 || key.contains("onSkippedVideo") || key.contains("onVideoComplete")
                 || key.contains("onAdDismiss") || key.contains("onRewardVerify");
+    }
+
+    /**
+     * 挂钩错误/失败回调，只记日志，不改变原有返回值。
+     *
+     * <p>之前规则表里没有这类方法，导致「播放失败」时模块一条记录都没有，
+     * 无法区分是没填充、网络错还是平台审核拒绝。现在把错误码、错误信息
+     * 原样打进 tunnet.log。</p>
+     */
+    private boolean installError(final Rules.Rule rule, final Method method) {
+        final String key = keyOf(method);
+        if (hooked.containsKey(key)) return false;
+        final Class<?>[] types = method.getParameterTypes();
+        try {
+            xi.hook(method)
+                    .setPriority(PRIORITY)
+                    .intercept(new XposedInterface.Hooker() {
+                        @Override
+                        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                            Object result;
+                            try {
+                                Object[] args = toArray(chain.getArgs());
+                                Logs.e("广告失败 " + key + " [" + rule.sdk + "] "
+                                        + describeErrorArgs(types, args));
+                            } catch (Throwable t) {
+                                Logs.w("记录广告失败回调出错: " + t);
+                            }
+                            result = chain.proceed();
+                            return result;
+                        }
+                    });
+            hooked.put(key, Boolean.TRUE);
+            Logs.i("hook 错误回调 " + key + " [" + rule.sdk + "]");
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 把错误回调的实参转成可读文本：错误码原样输出，Throwable 取 message，其余 toString。 */
+    private static String describeErrorArgs(Class<?>[] types, Object[] args) {
+        if (args == null || args.length == 0) return "";
+        StringBuilder sb = new StringBuilder("argc=").append(args.length).append(' ');
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) sb.append(", ");
+            String typeName = i < types.length ? simpleName(types[i]) : "?";
+            sb.append('(').append(i).append(':').append(typeName).append(")=");
+            Object value = args[i];
+            if (value == null) {
+                sb.append("null");
+                continue;
+            }
+            if (value instanceof Throwable) {
+                Throwable t = (Throwable) value;
+                sb.append(t.getClass().getName()).append(':').append(t.getMessage());
+                continue;
+            }
+            try {
+                sb.append(String.valueOf(value));
+            } catch (Throwable t) {
+                sb.append("<toString 失败>");
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String simpleName(Class<?> type) {
+        if (type == null) return "?";
+        String name = type.getName();
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.substring(dot + 1) : name;
     }
 
     private boolean installTrigger(final Rules.Rule rule, final Method method) {
@@ -1236,6 +1310,7 @@ public final class AdHookEngine {
                 String methodName = method.getName();
                 if (rule.isReward(methodName) && installReward(rule, method)) hits++;
                 else if (rule.isTrigger(methodName) && installTrigger(rule, method)) hits++;
+                else if (rule.isError(methodName) && installError(rule, method)) hits++;
             }
             if (hits > 0) {
                 Logs.i("兜底 hook 接口 " + name + " 命中 " + hits + " 个方法 [" + rule.sdk + "]");

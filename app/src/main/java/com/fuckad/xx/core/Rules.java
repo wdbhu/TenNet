@@ -17,23 +17,64 @@ import java.util.List;
  */
 public final class Rules {
 
+    /**
+     * 默认的错误回调方法名。
+     *
+     * <p>广告加载/播放失败时 SDK 走的是这些方法，之前规则表里一个都没有，
+     * 结果「播放失败」时日志里没有任何痕迹，无法区分是没填充、网络错还是审核拒绝。
+     * 现在统一挂上，只记日志、不改行为。</p>
+     */
+    private static final String[] DEFAULT_ERROR_NAMES = {
+            "onAdError",          // 通用
+            "onADError",
+            "onError",
+            "onAdFailed",
+            "onAdFail",
+            "onAdFailedToLoad",
+            "onAdLoadFailed",
+            "onAdFailedToShow",
+            "onLoadFailed",
+            "onRenderFail",
+            "onNoAd",             // 优量汇 / 广点通：无广告填充
+            "onVideoError",
+            "onMediaError",
+            "onRewardFailed",
+            "onRewardError",
+            "onAdShowError",
+            "onShowError",
+            "onAdVideoError",
+    };
+
     public static final class Rule {
 
         public final String sdk;
         public final String targetDesc;
         public final String[] rewardNames;
         public final String[] triggerNames;
+        public final String[] errorNames;
         public final boolean deliverOnTrigger;
 
+        /** 通用错误回调名（绝大多数 SDK 都适用）。 */
         public Rule(String sdk,
-             String targetDesc,
-             String[] rewardNames,
-             String[] triggerNames,
-             boolean deliverOnTrigger) {
+                    String targetDesc,
+                    String[] rewardNames,
+                    String[] triggerNames,
+                    boolean deliverOnTrigger) {
+            this(sdk, targetDesc, rewardNames, triggerNames, DEFAULT_ERROR_NAMES, deliverOnTrigger);
+        }
+
+        /** 需要额外/自定义错误回调名时用这个。 */
+        public Rule(String sdk,
+                    String targetDesc,
+                    String[] rewardNames,
+                    String[] triggerNames,
+                    String[] errorNames,
+                    boolean deliverOnTrigger) {
             this.sdk = sdk;
             this.targetDesc = targetDesc;
             this.rewardNames = rewardNames == null ? new String[0] : rewardNames;
             this.triggerNames = triggerNames == null ? new String[0] : triggerNames;
+            this.errorNames = errorNames == null ? DEFAULT_ERROR_NAMES : errorNames;
             this.deliverOnTrigger = deliverOnTrigger;
         }
 
@@ -43,6 +84,11 @@ public final class Rules {
 
         public boolean isTrigger(String methodName) {
             return contains(triggerNames, methodName);
+        }
+
+        /** 是否是错误/失败回调。命中后只记日志，不干预原有流程。 */
+        public boolean isError(String methodName) {
+            return contains(errorNames, methodName);
         }
 
         public String primaryRewardName() {
@@ -56,6 +102,7 @@ public final class Rules {
             }
             return false;
         }
+
 
         @Override
         public String toString() {
@@ -224,7 +271,75 @@ public final class Rules {
                 new String[]{"onVideoComplete", "onAdClose", "onSkippedVideo"},
                 true));
 
+        // ===== 错误/加载结果回调 =====
+        // 这些规则只负责把失败链路记进日志，rewardNames / triggerNames 都为空，
+        // deliverOnTrigger=false，不会干预原有流程。
+        // 加它们的原因：「播放失败」时模块完全无记录，无法区分没填充/网络错/审核拒绝。
+
+        list.add(errorOnly("CSJ-加载",
+                "Lcom/bytedance/sdk/openadsdk/TTAdNative$RewardVideoAdListener;",
+                "onError"));
+        list.add(errorOnly("CSJ-信息流加载",
+                "Lcom/bytedance/sdk/openadsdk/TTAdNative$FeedAdListener;",
+                "onError"));
+        list.add(errorOnly("CSJ-插全屏加载",
+                "Lcom/bytedance/sdk/openadsdk/TTAdNative$FullScreenVideoAdListener;",
+                "onError"));
+
+        list.add(errorOnly("GM-加载",
+                "Lcom/bytedance/msdk/api/v2/ad/reward/GMRewardedAdLoadListener;",
+                "onAdLoadFail", "onError"));
+        list.add(errorOnly("GM-展示",
+                "Lcom/bytedance/msdk/api/v2/ad/reward/GMRewardedAdShowListener;",
+                "onAdShowFail"));
+
+        list.add(errorOnly("GDT-加载",
+                "Lcom/qq/e/ads/rewardvideo/RewardVideoADListener;",
+                "onNoAd", "onADLoad"));
+
+        list.add(errorOnly("KS-加载",
+                "Lcom/kwad/sdk/api/KsRewardVideoAd$RewardAdInteractionListener;",
+                "onError", "onAdFailed"));
+
+        list.add(errorOnly("BAIDU-加载",
+                "Lcom/baidu/mobads/sdk/api/RewardVideoAd$RewardVideoAdListener;",
+                "onAdFailed", "onError"));
+
+        list.add(errorOnly("TOPN-加载",
+                "Lcom/anythink/rewardvideo/api/ATRewardVideoListener;",
+                "onRewardVideoAdLoadFail", "onRewardedVideoAdPlayFailed",
+                "onRewardVideoAdPlayError"));
+
+        list.add(errorOnly("SIGMOB-加载",
+                "Lcom/sigmob/windad/rewardVideo/WindRewardVideoAdListener;",
+                "onRewardAdLoadError", "onRewardAdPlayError"));
+
+        list.add(errorOnly("MIMO-加载",
+                "Lcom/miui/zeus/mimo/sdk/RewardVideoAd$RewardVideoLoadListener;",
+                "onAdLoadFailed"));
+
+        list.add(errorOnly("SDM-加载",
+                "Lcom/smartdigimkt/sdk/api/format/SDMRewardVideoListener;",
+                "onAdError", "onAdFailed", "onLoadFailed"));
+
+        list.add(errorOnly("趣头条-加载",
+                "Lcom/coohua/base/sdk/ad/callback/RewardVideoAdListener;",
+                "onError", "onAdFailed"));
+
+        list.add(errorOnly("TAPS-加载",
+                "Lcom/tapsdk/tapad/group/ads/DirichletRewardVideoAd$RewardAdInteractionListener;",
+                "onError", "onAdFailed"));
+
+        list.add(errorOnly("汇川-加载",
+                "Lcom/noah/api/RewardedVideoAd$AdListener;",
+                "onAdError", "onError"));
+
         ALL = Collections.unmodifiableList(list);
+    }
+
+    /** 只挂错误回调的规则：不参与发奖，只记日志。 */
+    private static Rule errorOnly(String sdk, String targetDesc, String... errorNames) {
+        return new Rule(sdk, targetDesc, new String[0], new String[0], errorNames, false);
     }
 
     private Rules() {
