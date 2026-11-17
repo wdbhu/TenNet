@@ -1,7 +1,7 @@
 id=com.TunNet.n520
 name=TenNet
-version=v7.21
-versionCode=721
+version=v7.22
+versionCode=722
 author=酷安@许愿魅族20临时root
 description=通用激励视频跳过助手：hook 穿山甲/优量汇/快手/百度/TapAD 等奖励回调，跳过广告照样拿奖励；支持奖励倍率、环境检测绕过与设备指纹重置。基于 libxposed API 102。
 minApiVersion=102
