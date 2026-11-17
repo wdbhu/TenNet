@@ -727,9 +727,18 @@ public final class AdHookEngine {
                                 if (passthrough && Logs.isEnabled()) {
                                     Logs.d("奖励回调原样放行(倍率不动，仅 1 次): " + key);
                                 }
-                                Object[] fixed = passthrough
-                                        ? ArgFixer.fillNullArgs(types, original)
-                                        : ArgFixer.fixRewardArgs(types, original);
+                                // 参数为 null 时补不补，由设置开关控制（默认关）。
+                                // 有些聚合层（TopOn）在百度/快手源下会把 ATAdInfo 传 null，
+                                // 而 App 侧监听器是 Kotlin 非空参数，直接 NPE，奖励到不了账。
+                                // 但 Java 写法的 null 往往有业务含义，所以默认不补。
+                                Object[] fixed;
+                                if (passthrough) {
+                                    fixed = Config.fillNullArgs()
+                                            ? ArgFixer.fillNullArgs(types, original)
+                                            : null;
+                                } else {
+                                    fixed = ArgFixer.fixRewardArgs(types, original);
+                                }
                                 Object result = fixed != null ? chain.proceed(fixed) : chain.proceed();
                                 if (!passthrough) {
                                     multiplyNaturalReward(self, method, fixed, original);
