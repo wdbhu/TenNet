@@ -1,5 +1,6 @@
 package com.example.kernelsustyleuikit.ui.screen.modulesettings
 
+import androidx.compose.material.icons.rounded.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -216,6 +217,19 @@ fun ModuleSettingsScreen() {
                             },
                             checked = uiState.tnDedupe,
                             onCheckedChange = viewModel::setTnDedupe,
+                        )
+                        SwitchPreference(
+                            title = stringResource(R.string.tunnet_fill_null),
+                            summary = stringResource(R.string.tunnet_fill_null_desc),
+                            startAction = {
+                                Icon(
+                                    Icons.Rounded.Build,
+                                    contentDescription = null,
+                                    tint = colorScheme.onBackground,
+                                )
+                            },
+                            checked = uiState.tnFillNullArgs,
+                            onCheckedChange = viewModel::setTnFillNullArgs,
                         )
                     }
                     Spacer(Modifier.height(24.dp))
