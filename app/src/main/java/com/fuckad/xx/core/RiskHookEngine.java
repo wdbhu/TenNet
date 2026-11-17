@@ -26,7 +26,9 @@ public final class RiskHookEngine {
 
     private static final int PRIORITY = 50;
 
-    private static final Set<String> sHooked = new HashSet<>();
+    /** 已成功挂上的风控点。用并发集合：install 在后台线程，可能与其他路径并发。 */
+    private static final Set<String> sHooked =
+            java.util.Collections.synchronizedSet(new HashSet<String>());
 
     private RiskHookEngine() {
     }
@@ -180,6 +182,9 @@ public final class RiskHookEngine {
                     n++;
                     Logs.d("风控 hook " + key + " -> 属性过滤");
                 } catch (Throwable ignored) {
+                    synchronized (sHooked) {
+                        sHooked.remove(key);
+                    }
                 }
                 break;
             }
@@ -188,14 +193,21 @@ public final class RiskHookEngine {
         return n;
     }
 
-    /** 只拦确定用于检测的属性，其余原样放行。 */
+    /**
+     * 只拦确定用于检测的属性，其余原样放行。
+     *
+     * <p>注意 ro.secure 不能返回 "0"：那是「设备不安全/可 root」的含义，
+     * 与这里把 ro.debuggable 置 0、ro.build.tags 置 release-keys 自相矛盾，
+     * 反而是一个强 root 信号。正常零售机 ro.secure=1。</p>
+     */
     private static String fakeProp(String name) {
         if (name == null) return null;
         switch (name) {
             case "ro.debuggable":
-            case "ro.secure":
             case "ro.kernel.qemu":
                 return "0";
+            case "ro.secure":
+                return "1";
             case "ro.build.tags":
                 return "release-keys";
             case "ro.build.type":
@@ -284,6 +296,9 @@ public final class RiskHookEngine {
             Logs.d("风控 hook " + key + " -> 动态指纹");
             return true;
         } catch (Throwable t) {
+            synchronized (sHooked) {
+                sHooked.remove(key);
+            }
             Logs.w("风控 hook 失败 " + key + " : " + t);
             return false;
         }
@@ -397,9 +412,24 @@ public final class RiskHookEngine {
         return hookMethod(xi, find(loader, cls, name, paramCount, "boolean"), Boolean.FALSE);
     }
 
+    /**
+     * hook 一个「返回 null」的方法。
+     *
+     * <p>以前 find 不限返回类型、无条件返回 null。若目标方法声明为 boolean/int，
+     * 框架拆箱会直接抛异常，等于让这个检测点每次调用都炸。
+     * 现在只接受引用类型返回值，基本类型跳过并记日志。</p>
+     */
     private static boolean hookNull(XposedInterface xi, ClassLoader loader, String cls,
                                     String name, int paramCount) {
-        return hookMethod(xi, find(loader, cls, name, paramCount, null), null);
+        Method target = find(loader, cls, name, paramCount, null);
+        if (target == null) return false;
+        if (target.getReturnType().isPrimitive()) {
+            Logs.w("跳过 hook " + cls + "#" + name
+                    + "：返回基本类型 " + target.getReturnType().getName()
+                    + "，不能返回 null");
+            return false;
+        }
+        return hookMethod(xi, target, null);
     }
 
     private static boolean hookMethodInt(XposedInterface xi, ClassLoader loader, String cls,
@@ -506,6 +536,10 @@ public final class RiskHookEngine {
             Logs.d("风控 hook " + key + " -> " + value);
             return true;
         } catch (Throwable t) {
+            // 失败就把 key 撤回，否则这一类风控点在本进程里永久失效、再也重试不了
+            synchronized (sHooked) {
+                sHooked.remove(key);
+            }
             Logs.w("风控 hook 失败 " + key + " : " + t);
             return false;
         }

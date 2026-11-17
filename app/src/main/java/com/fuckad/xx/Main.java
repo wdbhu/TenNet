@@ -52,13 +52,15 @@ public final class Main extends XposedModule {
         final ClassLoader loader = param.getClassLoader();
 
         // onPackageReady 仍处于启动阶段，remotePreferences() 是跨进程调用会阻塞。
-        // 延后到消息队列空闲时再装，冷启动感知明显。
-        new Handler(Looper.getMainLooper()).post(new Runnable() {
+        // 延后执行，避开冷启动的关键路径：
+        // 用 postDelayed(120ms) + 后台线程做扫描，主线程只负责最后的 hook 安装
+        //（Handler.postIdle 是隐藏 API，不能直接用）。
+        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
             @Override
             public void run() {
                 install(pkg, info, loader, "ready");
             }
-        });
+        }, 120L);
     }
 
     private void install(String packageName,
@@ -83,6 +85,9 @@ public final class Main extends XposedModule {
             Logs.d("本进程已安装过，跳过 " + stage);
             return;
         }
+        // 从这里往下的每个提前返回都会释放 sInstalled，
+        // 否则本进程再也没有第二次安装机会
+        //（典型场景：先关总开关/不勾选启动一次，再打开开关 → 必须冷启动才生效）
 
         // 日志文件必须最先打开：之前放在配置读取之后，
         // 「remote prefs keys」「配置: enabled=...」这些排查时最有用的前几行
@@ -154,13 +159,19 @@ public final class Main extends XposedModule {
 
         if (!Config.enabled()) {
             Logs.i("模块已关闭，跳过安装");
+            // 释放占位：用户随后打开总开关时，该进程应能在下一次 onPackageReady 重新安装，
+            // 不必强制冷启动
+            sInstalled.set(false);
             return;
         }
 
         // 勾选名单闸门：设置页取消勾选的 App，即使 LSPosed 仍然注入本模块，
-        // 这里也直接退出，不装任何 hook。未配置过名单时保持旧行为（全部生效）。
+        // 这里也直接退出，不装任何 hook。
+        // 注意：名单为空（从未配置）时是「全部不生效」，不是「全部生效」——
+        // Config.LEGACY_ALL_ENABLED = false，作用域必须在设置页或 LSPosed 里勾选。
         if (!Config.isAppEnabled(packageName)) {
             Logs.i("本 App 未被勾选，跳过安装 " + packageName);
+            sInstalled.set(false);
             return;
         }
 
@@ -206,6 +217,8 @@ public final class Main extends XposedModule {
                     result = engine.scan(appInfo);
                 } catch (Throwable t) {
                     Logs.e("dex 扫描失败", t);
+                    // 扫描失败不应让该进程永久失去 hook 机会
+                    sInstalled.set(false);
                     return;
                 }
                 Logs.raw("扫描结果就绪，切到主线程安装 hook");
@@ -263,10 +276,13 @@ public final class Main extends XposedModule {
                     proc = sb.toString();
                 }
             }
-            if (proc == null || proc.isEmpty()) return true;
+            // 拿不到进程名时保守返回 false（不是主进程）：
+            // 以前两处都返回 true，子进程会被当成主进程重复跑扫描+装 hook，
+            // 正是上面注释要避免的整机卡顿。
+            if (proc == null || proc.isEmpty()) return false;
             return proc.equals(packageName);
         } catch (Throwable t) {
-            return true;
+            return false;
         }
     }
 

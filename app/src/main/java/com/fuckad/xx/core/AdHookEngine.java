@@ -48,9 +48,28 @@ public final class AdHookEngine {
     /**
      * 最近一次「真实」奖励回调实参，按 方法签名 存一份。
      * 补发时优先复用它——自己用 Unsafe 造的空壳参数会被 App 读字段 NPE。
+     *
+     * <p>只作为「最近一轮」的临时缓存：带时间戳，超过 TTL 自动作废；
+     * 且每次真实回调都会整体覆盖。不能拿它做「是否已经发过奖励」的判断，
+     * 那个判断交给 RewardLedger（按对象+会话+窗口记账）。</p>
      */
-    private static final java.util.Map<String, Object[]> sRealRewardArgs =
+    private static final java.util.Map<String, RealArgs> sRealRewardArgs =
             new java.util.concurrent.ConcurrentHashMap<>();
+    /** 真实参数缓存的存活时间：超过一轮广告就作废，避免拿着上一轮的交易号去补发。 */
+    private static final long REAL_ARGS_TTL_MS = 90_000L;
+
+    /** 带采集时间的真实回调实参。 */
+    private static final class RealArgs {
+        final Object[] args;
+        final long at;
+        final int session;
+
+        RealArgs(Object[] args, long at, int session) {
+            this.args = args;
+            this.at = at;
+            this.session = session;
+        }
+    }
     /**
      * 按「参数类型」共享的真实回调对象。
      *
@@ -72,7 +91,14 @@ public final class AdHookEngine {
     /** 广告真正开始展示的时间（onAdShow 这类展示回调），自动关闭用它算延迟。 */
     private static volatile long sLastShowAt;
 
-    /** 关闭广告页之前调用：让 SDK 走一次 onAdClose/onVideoComplete，奖励才有机会发出去。 */
+    /**
+     * 关闭广告页之前调用：让 SDK 走一次 onAdClose/onVideoComplete，奖励才有机会发出去。
+     *
+     * <p>这里补发奖励是「我们自己发起」的调用，必须走 RewardLedger 记账并带注入标记，
+     * 否则被 hook 的奖励方法会把它当成原生回调再放大一次（倍率越大越失控）。
+     * 以前这里直接 invoke、只靠 sLastRewardAt 做 3 秒节流，而 sLastRewardAt
+     * 只在它内部被写、真实回调从不更新，等于节流失效 → 真实奖励到账后再补一份。</p>
+     */
     public static boolean fireLastClose() {
         Object target = sLastAdTargetRef == null ? null : sLastAdTargetRef.get();
         if (target == null) return false;
@@ -81,22 +107,46 @@ public final class AdHookEngine {
         if (now - sLastFireAt < 3_000L) return false;
         sLastFireAt = now;
         boolean fired = false;
+
         // 先补一次奖励：CSJ 的 onRewardVerify(true,1,...) / GDT 的 onReward(Map)
-        Method reward = sRewardMethods.get(target.getClass());
-        if (reward != null && now - sLastRewardAt < 3_000L) {
-            reward = null;
+        Method reward;
+        synchronized (sRewardMethods) {
+            reward = sRewardMethods.get(target.getClass());
         }
         if (reward != null) {
-            try {
-                reward.setAccessible(true);
-                Object[] args = ArgFixer.buildRewardArgs(reward.getParameterTypes(), new Object[0]);
-                reward.invoke(target, args);
-                sLastRewardAt = now;
-                Logs.i("关闭前补发奖励 " + reward.getName() + " @ "
-                        + target.getClass().getName());
-                fired = true;
-            } catch (Throwable t) {
-                Logs.w("关闭前补发奖励失败: " + t);
+            final String methodKey = keyOf(reward);
+            // 真实奖励已经到账（本会话同一方法已记账）就不再补，避免双发
+            boolean alreadyDone = !RewardLedger.tryInject(target, "close", methodKey, false);
+            if (alreadyDone) {
+                if (Logs.isEnabled()) {
+                    Logs.d("关闭前跳过补发：本会话已发放 " + reward.getName());
+                }
+            } else {
+                try {
+                    reward.setAccessible(true);
+                    Object[] args = ArgFixer.buildRewardArgs(
+                            reward.getParameterTypes(), new Object[0]);
+                    if (args != null) {
+                        boolean synthetic = ArgFixer.anyNeedsSynthesis(
+                                reward.getParameterTypes());
+                        RewardLedger.beginInject();
+                        try {
+                            reward.invoke(target, args);
+                        } finally {
+                            RewardLedger.endInject();
+                        }
+                        sLastRewardAt = now;
+                        Logs.i("关闭前补发奖励 " + reward.getName() + " @ "
+                                + target.getClass().getName()
+                                + (synthetic ? "（构造参数）" : ""));
+                        fired = true;
+                    } else {
+                        RewardLedger.forget(target, "close", methodKey);
+                    }
+                } catch (Throwable t) {
+                    RewardLedger.forget(target, "close", methodKey);
+                    Logs.w("关闭前补发奖励失败: " + t);
+                }
             }
         }
         java.util.List<Method> closes;
@@ -216,9 +266,14 @@ public final class AdHookEngine {
 
     private static String scanKey(List<Rules.Rule> rules, List<File> apks) {
         StringBuilder sb = new StringBuilder();
-        sb.append("v1");
+        sb.append("v2");
         for (Rules.Rule rule : rules) {
+            // 方法名必须参与，否则升级后「只加了新方法名」的规则会命中旧缓存，
+            // 新方法对应的实现类永远扫不出来
             sb.append('|').append(rule.sdk).append(':').append(rule.targetDesc);
+            for (String n : rule.rewardNames) sb.append('+').append(n);
+            for (String n : rule.triggerNames) sb.append('~').append(n);
+            for (String n : rule.errorNames) sb.append('-').append(n);
         }
         for (File file : apks) {
             sb.append('|').append(file.getAbsolutePath())
@@ -250,7 +305,7 @@ public final class AdHookEngine {
             reader = new BufferedReader(new InputStreamReader(
                     new FileInputStream(cache), StandardCharsets.UTF_8));
             if (!"TUNNET_SCAN".equals(reader.readLine())) return null;
-            if (!"1".equals(reader.readLine())) return null;
+            if (!"2".equals(reader.readLine())) return null;
             if (!key.equals(reader.readLine())) return null;
 
             Map<String, List<String>> out = new LinkedHashMap<>();
@@ -308,7 +363,7 @@ public final class AdHookEngine {
             writer = new BufferedWriter(new OutputStreamWriter(
                     new FileOutputStream(tmp), StandardCharsets.UTF_8));
             writer.write("TUNNET_SCAN\n");
-            writer.write("1\n");
+            writer.write("2\n");
             writer.write(key);
             writer.write('\n');
             for (Map.Entry<String, List<String>> entry : impls.entrySet()) {
@@ -464,7 +519,8 @@ public final class AdHookEngine {
         final AdHookEngine engine = sEngine;
         if (engine == null || loader == null) return;
         if (loader == AdHookEngine.class.getClassLoader()) return;
-        if (LAZY_COUNT.get() >= 8) return;
+        // 上限内允许重扫；以前只增不减，累计 8 个 loader 后本进程永久停用
+        if (LAZY_COUNT.get() >= 32) return;
         synchronized (LAZY_SCANNED) {
             if (!LAZY_SCANNED.add(loader)) return;
         }
@@ -573,13 +629,12 @@ public final class AdHookEngine {
                 boolean error = rule.isError(name);
                 if (!reward && !trigger && !error) continue;
                 for (Method method : entry.getValue()) {
-                    if (reward) {
-                        if (installReward(rule, method)) hits++;
-                    } else if (trigger) {
-                        if (installTrigger(rule, method)) hits++;
-                    } else if (error) {
-                        if (installError(rule, method)) hits++;
-                    }
+                    // 用多个独立 if 而不是 else-if：同一个方法名可能在一条规则里
+                    // 同时是 reward 和 trigger（如 LIQUID 的 onVideoComplete），
+                    // else-if 会静默丢掉后面的语义。hooked 去重保证不会重复安装。
+                    if (reward && installReward(rule, method)) hits++;
+                    if (trigger && installTrigger(rule, method)) hits++;
+                    if (error && installError(rule, method)) hits++;
                 }
             }
             return hits;
@@ -594,7 +649,7 @@ public final class AdHookEngine {
         Map<String, List<Method>> out = new LinkedHashMap<>();
         Class<?> current = clazz;
         int depth = 0;
-        while (current != null && current != Object.class && depth++ < 8) {
+        while (current != null && current != Object.class && depth++ < 24) {
             Method[] declared;
             try {
                 declared = current.getDeclaredMethods();
@@ -676,9 +731,15 @@ public final class AdHookEngine {
                         }
                     });
                 } catch (Throwable ignored) {
+                    // 单个构造函数失败不影响其他构造函数
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            // 整体失败：把标记撤回，否则这个类的实例捕获在本进程里永久失效，
+            // 连带 fireLastClose 的 sLastAdTargetRef 一直拿不到值
+            synchronized (sCtorHooked) {
+                sCtorHooked.remove(clazz);
+            }
         }
     }
 
@@ -714,7 +775,11 @@ public final class AdHookEngine {
                                 // 真实回调（不是我们补发进去的）把实参存一份，关闭时补发直接复用，
                                 // 避免自造空壳参数被 App 读字段 NPE
                                 if (original != null && original.length > 0) {
-                                    sRealRewardArgs.put(key, original.clone());
+                                    // 带时间戳与会话代次：只代表「本轮」，不能用来判断「发过没发过」
+                                    sRealRewardArgs.put(key, new RealArgs(
+                                            original.clone(),
+                                            System.currentTimeMillis(),
+                                            self == null ? 0 : RewardLedger.sessionOfPublic(self)));
                                     // 同时按类型记一份：同一次广告的多个监听器共享同一个真实对象
                                     for (Object arg : original) {
                                         if (arg != null) {
@@ -777,6 +842,8 @@ public final class AdHookEngine {
                                               Object[] fixed, Object[] original) {
         int times = Config.rewardMultiplier();
         if (times <= 1 || self == null || method == null) return;
+        // 补发过程中（含跨线程回声）绝不再放大，否则会递归叠加
+        if (RewardLedger.isInjecting()) return;
         Object[] args = fixed != null ? fixed : original;
         RewardLedger.beginInject();
         try {
@@ -795,15 +862,44 @@ public final class AdHookEngine {
     /** 展示回调触发补发前，至少等这么久，让真实奖励回调先到手。 */
     private static final long MIN_SHOW_WAIT_MS = 1500L;
 
-    /** 该规则对应的奖励方法是否已经收到过真实回调（说明奖励已经由 SDK 发了）。 */
+    /**
+     * 该规则对应的奖励方法在本轮广告会话里是否已经收到过真实回调。
+     *
+     * <p>以前只做 containsKey，key 是方法签名、永不清除，等于「这个进程里曾经收到过一次
+     * 真实奖励」→ 之后每一轮展示补发都被跳过，表现为「用一会儿就不发奖了」。
+     * 现在按 会话代次 + TTL 判断，只认本轮。</p>
+     */
     private boolean hasRealRewardArgs(Rules.Rule rule, Object self) {
         if (self == null) return false;
         String name = rule.primaryRewardName();
         if (name == null) return false;
+        final int session = RewardLedger.sessionOfPublic(self);
+        final long now = System.currentTimeMillis();
         for (Method m : methodsFor(self.getClass(), name)) {
-            if (sRealRewardArgs.containsKey(keyOf(m))) return true;
+            RealArgs real = sRealRewardArgs.get(keyOf(m));
+            if (real == null) continue;
+            if (real.session != session) continue;
+            if (now - real.at > REAL_ARGS_TTL_MS) continue;
+            return true;
         }
         return false;
+    }
+
+    /**
+     * 取本轮广告的真实回调参数。
+     *
+     * <p>只在本会话 + TTL 内返回，否则 null 走重新构造。
+     * 以前无条件复用上一轮缓存，会拿旧交易号/旧 placement 去补发：
+     * 服务端按 ID 去重会判重复拒绝，或发到错误档位。</p>
+     */
+    private static Object[] freshRealArgs(String methodKey, int expectedLen, Object self) {
+        if (self == null) return null;
+        RealArgs real = sRealRewardArgs.get(methodKey);
+        if (real == null) return null;
+        if (real.args == null || real.args.length != expectedLen) return null;
+        if (real.session != RewardLedger.sessionOfPublic(self)) return null;
+        if (System.currentTimeMillis() - real.at > REAL_ARGS_TTL_MS) return null;
+        return real.args;
     }
 
     /** 关闭回调优先级：数字越小越先调用。 */
@@ -845,7 +941,12 @@ public final class AdHookEngine {
                             } catch (Throwable t) {
                                 Logs.w("记录广告失败回调出错: " + t);
                             }
-                            result = chain.proceed();
+                            try {
+                                result = chain.proceed();
+                            } catch (Throwable t) {
+                                Logs.w("广告失败回调内部抛出异常 " + key + " : " + t);
+                                throw t;
+                            }
                             return result;
                         }
                     });
@@ -853,6 +954,7 @@ public final class AdHookEngine {
             Logs.i("hook 错误回调 " + key + " [" + rule.sdk + "]");
             return true;
         } catch (Throwable t) {
+            Logs.w("hook 错误回调失败 " + key + " : " + t);
             return false;
         }
     }
@@ -1112,9 +1214,9 @@ public final class AdHookEngine {
                 continue;
             }
             // 优先复用真实回调参数，其次才构造
-            Object[] cache = sRealRewardArgs.get(keyOf(method));
+            Object[] cache = freshRealArgs(keyOf(method), types.length, self);
             Object[] probe;
-            if (cache != null && cache.length == types.length) {
+            if (cache != null) {
                 probe = cache.clone();
             } else {
                 probe = ArgFixer.buildRewardArgs(types, triggerArgs);
@@ -1144,9 +1246,9 @@ public final class AdHookEngine {
 
         String methodKey = keyOf(target);
         boolean synthetic = ArgFixer.anyNeedsSynthesis(target.getParameterTypes());
-        Object[] cached = sRealRewardArgs.get(methodKey);
+        Object[] cached = freshRealArgs(methodKey, target.getParameterTypes().length, self);
         Object[] args;
-        if (cached != null && cached.length == target.getParameterTypes().length) {
+        if (cached != null) {
             args = cached.clone();
             synthetic = false;
             if (Logs.isEnabled()) {
@@ -1278,7 +1380,7 @@ public final class AdHookEngine {
         List<Method> out = new ArrayList<>();
         Class<?> current = clazz;
         int depth = 0;
-        while (current != null && current != Object.class && depth++ < 8) {
+        while (current != null && current != Object.class && depth++ < 24) {
             try {
                 for (Method method : current.getDeclaredMethods()) {
                     if (!method.getName().equals(name)) continue;
@@ -1308,9 +1410,12 @@ public final class AdHookEngine {
             for (Method method : clazz.getDeclaredMethods()) {
                 if (Modifier.isAbstract(method.getModifiers())) continue;
                 String methodName = method.getName();
-                if (rule.isReward(methodName) && installReward(rule, method)) hits++;
-                else if (rule.isTrigger(methodName) && installTrigger(rule, method)) hits++;
-                else if (rule.isError(methodName) && installError(rule, method)) hits++;
+                boolean r = rule.isReward(methodName);
+                boolean t = rule.isTrigger(methodName);
+                boolean e = rule.isError(methodName);
+                if (r && installReward(rule, method)) hits++;
+                if (t && installTrigger(rule, method)) hits++;
+                if (e && installError(rule, method)) hits++;
             }
             if (hits > 0) {
                 Logs.i("兜底 hook 接口 " + name + " 命中 " + hits + " 个方法 [" + rule.sdk + "]");

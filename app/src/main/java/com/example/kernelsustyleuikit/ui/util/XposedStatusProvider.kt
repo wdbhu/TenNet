@@ -27,9 +27,11 @@ object XposedStatusProvider {
 
     @JvmStatic
     fun ensureRegistered() {
+        // 必须先注册成功再置位：以前先置 true 再 runCatching，
+        // 一旦注册抛异常就永久 true，本进程再也不重试，服务一直是 null
+        //（连带所有设置写入静默走本地兜底、首页永远显示未连接）。
         if (registered) return
-        registered = true
-        runCatching {
+        val ok = runCatching {
             XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
                 override fun onServiceBind(svc: XposedService) {
                     service = svc
@@ -51,6 +53,9 @@ object XposedStatusProvider {
                     _status.value = XposedStatus.Disconnected
                 }
             })
-        }
+            true
+        }.getOrDefault(false)
+        // 注册成功才置位；失败时保持 false，下次调用会再试一次
+        if (ok) registered = true
     }
 }

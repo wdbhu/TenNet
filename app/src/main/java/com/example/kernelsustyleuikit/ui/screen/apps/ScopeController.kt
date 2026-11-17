@@ -79,11 +79,21 @@ object ScopeController {
      * 例外：没有 root 读不到 scope 表时，只能退回只信名单。
      */
     fun currentScope(ctx: Context? = null): Set<String> {
-        // 优先用 LSPosed 服务的 scope（这是 lspd 真正认的注入范围）
-        runCatching { XposedStatusProvider.service()?.scope?.toSet() }
-            .getOrNull()?.let { if (it.isNotEmpty()) return it }
-        // 服务没连上时退回名单（展示用）
-        return TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS) ?: emptySet()
+        // 真正生效需要两个条件同时满足：
+        //   1) lspd 把模块注入到该 App（LSPosed 的 scope 表）
+        //   2) hook 侧 Config.isAppEnabled() 放行（scope_apps 名单）
+        // 以前这里直接返回 scope 表，只要用户在 LSPosed 管理器里勾了，
+        // 界面就显示已启用，但 scope_apps 里没有 → 一行 hook 都不装。
+        val injected = runCatching { XposedStatusProvider.service()?.scope?.toSet() }
+            .getOrNull()?.takeIf { it.isNotEmpty() }
+        val listed = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
+
+        return when {
+            injected != null && listed != null -> injected intersect listed
+            listed != null -> listed          // 服务未连，只能信名单
+            injected != null -> injected      // 名单未配置（旧版本升级），按注入范围显示
+            else -> emptySet()
+        }
     }
 
     /**
@@ -96,42 +106,72 @@ object ScopeController {
      * 完全不加载，不会留下任何痕迹（银行/游戏类检测不到）。
      */
     fun add(ctx: Context, pkg: String, onDone: (Boolean) -> Unit = {}) {
-        // 名单同步一份，供 hook 侧兜底判断（scope 生效时它并不是必要条件）
-        runCatching {
-            val current = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
-                ?: currentScope(ctx)
-            TunNetPrefs.writeStringSet(Config.KEY_SCOPE_APPS, current.toMutableSet().apply { add(pkg) })
-        }
+        // 先记下原名单，授权失败时回滚。
+        // 以前先写名单再请求授权，用户点「拒绝」后名单里那条不会撤销，
+        // 该 App 一旦被别的方式加进 LSPosed scope 就会被 hook，而界面显示未勾选。
+        val before = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
 
         val svc = XposedStatusProvider.service()
         if (svc == null) {
             onDone(false)
             return
         }
+
+        fun commitList() {
+            runCatching {
+                val current = before ?: currentScope(ctx)
+                TunNetPrefs.writeStringSet(
+                    Config.KEY_SCOPE_APPS, current.toMutableSet().apply { add(pkg) })
+            }
+        }
+
         runCatching {
             val now = svc.scope.toMutableSet()
             if (pkg in now) {
+                commitList()
                 onDone(true)
                 return
             }
             now.add(pkg)
             svc.requestScope(now.toList(), object : XposedService.OnScopeEventListener {
                 override fun onScopeRequestApproved(scope: MutableList<String>) {
+                    if (pkg in scope) commitList() else rollback(before)
                     onDone(pkg in scope)
                 }
 
                 override fun onScopeRequestFailed(message: String) {
+                    rollback(before)
                     onDone(false)
                 }
             })
-        }.onFailure { onDone(false) }
+        }.onFailure {
+            rollback(before)
+            onDone(false)
+        }
+    }
+
+    /** 名单回滚到授权前的状态；before 为 null 表示原本就没配置过，直接清空。 */
+    private fun rollback(before: Set<String>?) {
+        runCatching {
+            if (before == null) {
+                TunNetPrefs.writeStringSet(Config.KEY_SCOPE_APPS, emptySet())
+            } else {
+                TunNetPrefs.writeStringSet(Config.KEY_SCOPE_APPS, before)
+            }
+        }
     }
 
     fun remove(ctx: Context, pkg: String, onDone: (Boolean) -> Unit = {}) {
-        runCatching {
+        // 取消勾选：名单写入结果要检查，写失败不能对 UI 谎报成功
+        val wrote = runCatching {
             val current = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
                 ?: currentScope(ctx)
-            TunNetPrefs.writeStringSet(Config.KEY_SCOPE_APPS, current.toMutableSet().apply { remove(pkg) })
+            TunNetPrefs.writeStringSet(
+                Config.KEY_SCOPE_APPS, current.toMutableSet().apply { remove(pkg) })
+        }.getOrDefault(false)
+        if (!wrote) {
+            onDone(false)
+            return
         }
 
         val svc = XposedStatusProvider.service()

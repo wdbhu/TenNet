@@ -23,7 +23,17 @@ public final class RewardLedger {
     private static final Map<Object, Map<String, Entry>> TABLE = new WeakHashMap<>();
     /** 每个监听对象的“广告会话”代次；新的展示回调会 +1，旧会话的记账自动失效。 */
     private static final Map<Object, Integer> SESSION = new WeakHashMap<>();
+    /**
+     * 注入标记必须跨线程生效。
+     *
+     * <p>聚合 SDK 常把奖励回调 post 到主线程 Handler 或另起线程执行，
+     * 只靠 ThreadLocal 时子线程读不到标记，会把我们发起的补发当成原生回调，
+     * 再叠加一次倍率（倍率越大越失控）。这里用全局计数 + 当前线程标记双写：
+     * 只要本进程内有任何一次补发正在进行，所有线程都视为「注入中」。</p>
+     */
     private static final ThreadLocal<Boolean> INJECTING = new ThreadLocal<>();
+    private static final java.util.concurrent.atomic.AtomicInteger INJECT_DEPTH =
+            new java.util.concurrent.atomic.AtomicInteger(0);
 
     private static final class Entry {
         final int state;
@@ -56,6 +66,11 @@ public final class RewardLedger {
         return target != null && sessionOf(target) == session;
     }
 
+    /** 供 AdHookEngine 记录真实参数时标注会话代次。 */
+    public static int sessionOfPublic(Object target) {
+        return sessionOf(target);
+    }
+
     private static int sessionOf(Object target) {
         synchronized (LOCK) {
             Integer current = SESSION.get(target);
@@ -68,14 +83,18 @@ public final class RewardLedger {
 
     public static void beginInject() {
         INJECTING.set(Boolean.TRUE);
+        INJECT_DEPTH.incrementAndGet();
     }
 
     public static void endInject() {
         INJECTING.remove();
+        // 防御：任何异常路径下的多减都不会让计数变负
+        if (INJECT_DEPTH.get() > 0) INJECT_DEPTH.decrementAndGet();
     }
 
     public static boolean isInjecting() {
-        return Boolean.TRUE.equals(INJECTING.get());
+        if (Boolean.TRUE.equals(INJECTING.get())) return true;
+        return INJECT_DEPTH.get() > 0;
     }
 
     /** 主动补发前调用：本会话、本方法窗口内已经发过就返回 false，避免一次广告拿两份奖励。 */

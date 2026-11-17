@@ -72,6 +72,9 @@ class SettingsViewModel(
                     tnToast = tn.toast,
                     tnDedupe = tn.dedupe,
                     tnDebug = tn.debug,
+                    // 之前 refresh() 漏了这一项，refreshTn() 里有：
+                    // 进设置页时 hook 侧 fill_null_args=true 也显示成关闭
+                    tnFillNullArgs = tn.fillNullArgs,
                 )
             }
         }

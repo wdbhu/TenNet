@@ -40,21 +40,61 @@ object LogsRepository {
         "/data/user/0/$pkg/cache/tunnet.log",
     ).distinct()
 
-    /** 用 root 读一个文件；失败返回 null。 */
-    private fun readWithRoot(path: String): String? = runCatching {
-        val p = ProcessBuilder("su", "-c", "cat '$path' 2>/dev/null").redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().use { it.readText() }
-        p.waitFor()
-        out.takeIf { it.isNotBlank() }
+    /**
+     * 用 root 跑一句命令，带超时。
+     *
+     * 以前没有超时：root 管理器弹出授权框而用户不响应时 su 会一直挂着，
+     * load() 的 IO 协程永久阻塞，日志页卡在 loading=true，点刷新也没反应。
+     */
+    private fun suExec(cmd: String, timeoutSec: Long = 8L): String? = runCatching {
+        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+        val reader = p.inputStream.bufferedReader()
+        val text = StringBuilder()
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val t = Thread {
+            try {
+                text.append(reader.readText())
+            } catch (ignored: Throwable) {
+            } finally {
+                done.set(true)
+            }
+        }
+        t.isDaemon = true
+        t.start()
+        val deadline = System.currentTimeMillis() + timeoutSec * 1000
+        while (!done.get() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+        if (!done.get()) {
+            // 超时：杀掉 su，避免进程泄漏
+            runCatching { p.destroyForcibly() }
+            t.interrupt()
+            return null
+        }
+        runCatching { p.waitFor() }
+        text.toString().ifBlank { null }
     }.getOrNull()
 
-    /** 用 root 列出所有目标 App 的日志文件。 */
+    /** 用 root 读一个文件；失败返回 null。 */
+    private fun readWithRoot(path: String): String? = suExec("cat '$path' 2>/dev/null")
+
+    /**
+     * 用 root 列出所有目标 App 的日志文件。
+     *
+     * 之前只扫 /data_mirror 一条前缀，而清空走的是三条候选路径，
+     * 读写不对称：落在 /data/user/0 的设备上列表恒空、但"清空"却能成功。
+     * 现在三条前缀都扫。
+     */
     private fun listLogFiles(): List<String> = runCatching {
-        val cmd = "ls -1 /data_mirror/data_ce/null/0/*/cache/tunnet.log 2>/dev/null"
-        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().use { it.readText() }
-        p.waitFor()
-        out.lines().filter { it.isNotBlank() && it.endsWith("tunnet.log") }
+        val cmd = listOf(
+            "/data_mirror/data_ce/null/0",
+            "/data/user/0",
+            "/data/data",
+        ).joinToString(" ") { "ls -1 '$it'/*/cache/tunnet.log 2>/dev/null;" }
+        suExec(cmd)?.lines()
+            ?.filter { it.isNotBlank() && it.endsWith("tunnet.log") }
+            ?.distinct()
+            ?: emptyList()
     }.getOrDefault(emptyList())
 
     suspend fun load(context: Context): List<LogItem> = withContext(Dispatchers.IO) {
@@ -95,10 +135,10 @@ object LogsRepository {
     /** 清空某个 App 的日志文件。 */
     suspend fun clear(packageName: String): Boolean = withContext(Dispatchers.IO) {
         candidateLogPaths(packageName).any { path ->
-            runCatching {
-                val p = ProcessBuilder("su", "-c", ": > '$path' 2>/dev/null").start()
-                p.waitFor() == 0
-            }.getOrDefault(false)
+            // 走带超时的 suExec：授权框不响应时不至于把 IO 线程永久挂住
+            suExec(": > '$path' 2>/dev/null || true") != null ||
+                runCatching { java.io.File(path).let { !it.exists() || it.length() == 0L } }
+                    .getOrDefault(false)
         }
     }
 }

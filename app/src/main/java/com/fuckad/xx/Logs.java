@@ -117,8 +117,14 @@ public final class Logs {
         append("I", msg, null);
     }
 
+    /**
+     * 警告：失败路径必须留下痕迹，因此不受调试开关控制。
+     *
+     * <p>以前这里跟随 sEnabled，而 sEnabled 由 Config.load 设置，
+     * 在 Main.install 里晚于 Logs.setFile —— 意味着「日志文件初始化失败」
+     * 这类最早、也最关键的告警写不出去，排障完全失声。</p>
+     */
     public static void w(String msg) {
-        if (!sEnabled) return;
         try {
             Log.w(TAG, msg);
         } catch (Throwable ignored) {
@@ -187,8 +193,20 @@ public final class Logs {
                 if (dir != null && !dir.isDirectory() && !dir.mkdirs()) return;
                 if (file.length() > MAX_FILE_BYTES) {
                     File old = new File(file.getPath() + ".1");
-                    if (old.exists()) old.delete();
-                    file.renameTo(old);
+                    boolean moved = false;
+                    try {
+                        if (old.exists()) old.delete();
+                        moved = file.renameTo(old);
+                    } catch (Throwable ignored) {
+                    }
+                    if (!moved) {
+                        // rename 失败时不能继续无限追加：直接截断当前文件保底，
+                        // 否则上限形同虚设、文件会一直涨
+                        try {
+                            new FileOutputStream(file, false).close();
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
                 FileOutputStream out = new FileOutputStream(file, true);
                 try {

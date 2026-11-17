@@ -47,8 +47,11 @@ object ImplFinder {
             val existing = known[rule.targetDesc] ?: emptyList()
             val names = mutableListOf<String>()
             try {
+                // searchPackages("*") 在 DexKit 里不是通配符：BuildPackagesMatchTrie
+                // 会把 "*" 规范化成 "L*/" 去建 trie，真实类描述符永远匹配不上，
+                // 结果是 findExtra 恒定返回空、DexKit 慢扫从未真正生效。
+                // 这里不设包过滤（默认扫全部），靠 addInterface 的 descriptor 精确筛选。
                 val found = bridge.findClass {
-                    searchPackages("*")
                     matcher {
                         addInterface {
                             descriptor(rule.targetDesc)
@@ -151,15 +154,18 @@ object ImplFinder {
     private fun getOrCreateBridge(context: Context): DexKitBridge? {
         synchronized(BRIDGES) {
             BRIDGES[context]?.let { return it }
-        }
-        if (!ensureSoLoaded(context)) return null
-        return try {
-            val apkPath = context.applicationInfo.sourceDir
-            val bridge = DexKitBridge.create(apkPath)
-            synchronized(BRIDGES) { BRIDGES[context] = bridge }
-            bridge
-        } catch (t: Throwable) {
-            null
+            // 建桥必须在锁内完成：慢扫和懒扫都在后台线程，可以并发首次进入。
+            // 以前在锁外 create、再回锁内直接覆盖，并发时会各建一份，
+            // 旧的那份永不 close（一份 native dex 索引几十到几百 MB）。
+            if (!ensureSoLoaded(context)) return null
+            return try {
+                val apkPath = context.applicationInfo.sourceDir
+                val bridge = DexKitBridge.create(apkPath)
+                BRIDGES[context] = bridge
+                bridge
+            } catch (t: Throwable) {
+                null
+            }
         }
     }
 

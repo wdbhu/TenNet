@@ -140,6 +140,11 @@ public final class AdCloser {
     }
 
     private static void closeNow(Object target, String name) {
+        // 用户在广告播放期间关掉「自动关闭」，已排队的任务不应再执行
+        if (!Config.autoClose()) {
+            SCHEDULED.remove(target);
+            return;
+        }
         try {
             if (target instanceof Activity) {
                 Activity activity = (Activity) target;
@@ -184,10 +189,35 @@ public final class AdCloser {
         return sMain;
     }
 
+    /**
+     * 落地页 / 隐私页 / 授权页不能关。
+     *
+     * <p>它们和激励视频共用同一个 SDK 包前缀，但用户还没看完广告，
+     * 关掉等于广告不结算、奖励回调也不会来。以前只看前缀，会把这些页面一起 finish。</p>
+     */
+    private static final String[] LANDING_MARKERS = {
+            "Landing",            // TTWebViewLandingActivity / TTRewardVideoLandingActivity
+            "Delegate",           // TTDelegateActivity（隐私协议/权限代理）
+            "Privacy",            // 隐私相关
+            "Agreement",
+            "Permission",
+            "WebView",
+            "Browser",
+    };
+
     static boolean isAdScreen(String className) {
         if (className == null) return false;
+        // 落地页/隐私页一律不关
+        for (String marker : LANDING_MARKERS) {
+            if (className.contains(marker)) return false;
+        }
         for (String prefix : AD_PACKAGE_PREFIXES) {
-            if (className.startsWith(prefix)) return true;
+            if (className.startsWith(prefix)) {
+                // 要求包边界：com.tapad 不能匹配 com.tapadXxx
+                if (className.length() == prefix.length()) return true;
+                char next = className.charAt(prefix.length());
+                return next == '.' || next == '$';
+            }
         }
         return false;
     }

@@ -293,9 +293,10 @@ public final class Rules {
                 "Lcom/bytedance/msdk/api/v2/ad/reward/GMRewardedAdShowListener;",
                 "onAdShowFail"));
 
+        // onADLoad 是「加载成功」回调，不能算错误；只用 onNoAd（无填充）
         list.add(errorOnly("GDT-加载",
                 "Lcom/qq/e/ads/rewardvideo/RewardVideoADListener;",
-                "onNoAd", "onADLoad"));
+                "onNoAd"));
 
         list.add(errorOnly("KS-加载",
                 "Lcom/kwad/sdk/api/KsRewardVideoAd$RewardAdInteractionListener;",

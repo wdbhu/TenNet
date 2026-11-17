@@ -9,8 +9,14 @@ package com.example.kernelsustyleuikit.ui.viewmodel
  */
 object DelayOptions {
 
-    /** 关闭延迟（毫秒）：广告页出现后多久自动关。 */
-    val AUTO_CLOSE: List<Int> = listOf(1000, 2000, 5000, 10000)
+    /**
+     * 关闭延迟（毫秒）：广告页出现后多久自动关。
+     *
+     * 必须包含 2500 —— Config 的默认 auto_close_delay 就是 2500，
+     * 以前表里没有这一项，autoCloseIndex(2500) 会回退到 5000，
+     * 界面显示「5 秒」而实际 2.5 秒就关了。
+     */
+    val AUTO_CLOSE: List<Int> = listOf(1000, 2000, 2500, 5000, 10000)
 
     /** 补发时机（毫秒）：0 = 立即。 */
     val REWARD: List<Int> = listOf(0, 1500, 3000, 5000)
