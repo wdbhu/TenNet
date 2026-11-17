@@ -46,6 +46,7 @@ object TunNetPrefs {
             toast = Config.toast(),
             dedupe = Config.dedupe(),
             debug = Config.debug(),
+            fillNullArgs = Config.fillNullArgs(),
         )
     }
 
@@ -53,6 +54,8 @@ object TunNetPrefs {
     fun remoteReady(): Boolean = remote() != null
 
     fun writeEnabled(v: Boolean) = writeBoolean(Config.KEY_ENABLED, v)
+
+    fun writeFillNullArgs(v: Boolean) = writeBoolean(Config.KEY_FILL_NULL_ARGS, v)
 
     /**
      * 写一个布尔值。成功写入远程时返回 true。
@@ -146,5 +149,6 @@ object TunNetPrefs {
         val toast: Boolean,
         val dedupe: Boolean,
         val debug: Boolean,
+        val fillNullArgs: Boolean,
     )
 }
