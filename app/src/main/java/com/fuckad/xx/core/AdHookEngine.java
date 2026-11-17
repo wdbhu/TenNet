@@ -1286,10 +1286,27 @@ public final class AdHookEngine {
         // 但实际构造可能返回 null —— 比如 anythink 的 ATAdInfo，
         // 目标 App 的 onReward(null) 会直接 NPE（getRequestId() on null），
         // 奖励发不出去。这里改成：先把参数真的造一遍，有 null 就换下一个候选。
+        /*
+         * 同名重载里优先挑「参数最多」的那个。
+         *
+         * 实测：优量汇的 GDTATRewardedVideoAdapter$b 同时有 onReward() 和
+         * onReward(Map)，无参版本往往只是个通知壳、只打点不往上传递，
+         * 真正把奖励交给聚合层和 App 的是带 Map 的那个。而 getDeclaredMethods()
+         * 的顺序不确定，之前挑中无参版本就会出现「日志说补发了、游戏没到账」。
+         * 快手那边是 onRewardVerify() 只有一个重载，所以一直正常。
+         */
+        java.util.List<Method> ordered = new java.util.ArrayList<>(candidates);
+        java.util.Collections.sort(ordered, new java.util.Comparator<Method>() {
+            @Override
+            public int compare(Method a, Method b) {
+                return b.getParameterCount() - a.getParameterCount();
+            }
+        });
+
         Method target = null;
         Object[] builtArgs = null;
         String firstBad = null;
-        for (Method method : candidates) {
+        for (Method method : ordered) {
             Class<?>[] types = method.getParameterTypes();
             if (!allProvideable(types)) {
                 if (firstBad == null) firstBad = badParam(types);
@@ -1364,7 +1381,8 @@ public final class AdHookEngine {
             for (int i = 0; i < times; i++) {
                 target.invoke(self, args);
             }
-            Logs.i("已补发奖励" + (times > 1 ? (" x" + times) : "") + " " + rewardName
+            Logs.i("已补发奖励" + (times > 1 ? (" x" + times) : "")
+                    + " " + keyOf(target)
                     + " -> " + RewardLedger.describe(self) + " [" + rule.sdk + "]");
             if (Config.toast()) Toaster.show("已补发奖励 · " + rule.sdk);
         } catch (InvocationTargetException ite) {
