@@ -14,11 +14,13 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 object XposedStatusProvider {
 
+    @Volatile
     private var registered = false
 
     private val _status = MutableStateFlow(XposedStatus.Disconnected)
     val status: StateFlow<XposedStatus> = _status.asStateFlow()
 
+    @Volatile
     private var service: XposedService? = null
 
     /** 最近一次绑定的 XposedService，供设置页写远程偏好用。 */
@@ -27,35 +29,40 @@ object XposedStatusProvider {
 
     @JvmStatic
     fun ensureRegistered() {
-        // 必须先注册成功再置位：以前先置 true 再 runCatching，
-        // 一旦注册抛异常就永久 true，本进程再也不重试，服务一直是 null
-        //（连带所有设置写入静默走本地兜底、首页永远显示未连接）。
+        // 快路径：已注册直接返回。registered 用 @Volatile，配合下面的 synchronized
+        // 避免主线程与 IO 线程并发首次进入时重复调用 registerListener。
         if (registered) return
-        val ok = runCatching {
-            XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
-                override fun onServiceBind(svc: XposedService) {
-                    service = svc
-                    _status.value = runCatching {
-                        XposedStatus(
-                            bound = true,
-                            frameworkName = svc.frameworkName ?: "",
-                            frameworkVersion = svc.frameworkVersion ?: "",
-                            frameworkCode = svc.frameworkVersionCode,
-                            apiVersion = svc.apiVersion,
-                        )
-                    }.getOrElse {
-                        XposedStatus(bound = true, frameworkName = "LSPosed")
+        synchronized(this) {
+            if (registered) return
+            val ok = runCatching {
+                XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
+                    override fun onServiceBind(svc: XposedService) {
+                        service = svc
+                        _status.value = runCatching {
+                            XposedStatus(
+                                bound = true,
+                                frameworkName = svc.frameworkName ?: "",
+                                frameworkVersion = svc.frameworkVersion ?: "",
+                                frameworkCode = svc.frameworkVersionCode,
+                                apiVersion = svc.apiVersion,
+                            )
+                        }.getOrElse {
+                            XposedStatus(bound = true, frameworkName = "LSPosed")
+                        }
                     }
-                }
 
-                override fun onServiceDied(svc: XposedService) {
-                    if (service === svc) service = null
-                    _status.value = XposedStatus.Disconnected
-                }
-            })
-            true
-        }.getOrDefault(false)
-        // 注册成功才置位；失败时保持 false，下次调用会再试一次
-        if (ok) registered = true
+                    override fun onServiceDied(svc: XposedService) {
+                        if (service === svc) service = null
+                        _status.value = XposedStatus.Disconnected
+                        // 服务进程重启后 helper 未必会自动重绑，复位 registered，
+                        // 让下一次 ensureRegistered 有机会重新注册。
+                        registered = false
+                    }
+                })
+                true
+            }.getOrDefault(false)
+            // 注册成功才置位；失败时保持 false，下次调用会再试一次
+            if (ok) registered = true
+        }
     }
 }

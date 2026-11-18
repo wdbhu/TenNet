@@ -36,37 +36,13 @@ object ScopeController {
      * 表现为「首页已启用 0」而应用页其实有勾选。
      * 现在缺省直接取 Context 的包名。
      */
-    @Volatile
-    private var modulePkg: String? = null
-
-    private fun pkgOf(ctx: Context?): String =
-        modulePkg ?: ctx?.packageName ?: ""
-
-    @Volatile
-    private var rootAvailable: Boolean? = null
-
     fun init(ctx: Context) {
-        modulePkg = ctx.packageName
         XposedStatusProvider.ensureRegistered()
     }
 
 
-    /**
-     * 是否能用 root 静默改写作用域。只缓存成功结果：
-     * 用户可能中途才在 KernelSU 里授权，永久缓存 false 会让模块一直以为没 root。
-     */
-    fun rootOk(): Boolean {
-        rootAvailable?.let { if (it) return true }
-        val ok = RootScopeWriter.hasRoot()
-        if (ok) rootAvailable = true
-        return ok
-    }
-
-    /** 有 root 时，勾选/取消只需要用户重开目标 App；没 root 还需要去 LSPosed 管理器勾。 */
-    fun needsLsposedManualPick(): Boolean = !rootOk()
-
-    /** 框架服务是否可用；不可用且没 root 时列表只展示。 */
-    fun ready(): Boolean = XposedStatusProvider.service() != null || rootOk()
+    /** 框架服务是否可用；不可用则勾选走 requestScope 必然失败，列表只展示。 */
+    fun ready(): Boolean = XposedStatusProvider.service() != null
 
     /**
      * 当前勾选的 App 集合 —— 只以 scope_apps 名单为准。
@@ -124,7 +100,9 @@ object ScopeController {
 
         fun commitList() {
             runCatching {
-                val current = before ?: currentScope(ctx)
+                // 用 currentScope(ctx)（已过滤掉已卸载包）作为基线，而不是未过滤的 before，
+                // 否则已卸载应用的脏数据会一直留在名单里清不掉。
+                val current = currentScope(ctx)
                 TunNetPrefs.writeStringSet(
                     Config.KEY_SCOPE_APPS, current.toMutableSet().apply { add(pkg) })
             }
@@ -167,10 +145,10 @@ object ScopeController {
     }
 
     fun remove(ctx: Context, pkg: String, onDone: (Boolean) -> Unit = {}) {
-        // 取消勾选：名单写入结果要检查，写失败不能对 UI 谎报成功
+        // 取消勾选：名单写入结果要检查，写失败不能对 UI 谎报成功。
+        // 用 currentScope(ctx)（已过滤已卸载包）作为基线，顺带清掉脏数据。
         val wrote = runCatching {
-            val current = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
-                ?: currentScope(ctx)
+            val current = currentScope(ctx)
             TunNetPrefs.writeStringSet(
                 Config.KEY_SCOPE_APPS, current.toMutableSet().apply { remove(pkg) })
         }.getOrDefault(false)

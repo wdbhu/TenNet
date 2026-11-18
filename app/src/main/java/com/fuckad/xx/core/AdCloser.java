@@ -59,8 +59,6 @@ public final class AdCloser {
 
     private static final Map<Object, Long> SCHEDULED =
             Collections.synchronizedMap(new WeakHashMap<Object, Long>());
-    /** 没收到展示回调时的兜底：至少留这么久，别把还没渲染出来的广告页关掉。 */
-    private static final long FALLBACK_MIN_MS = 1200L;
 
     private static Handler sMain;
 

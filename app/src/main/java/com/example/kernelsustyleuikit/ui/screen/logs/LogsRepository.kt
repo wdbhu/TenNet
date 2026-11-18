@@ -43,36 +43,40 @@ object LogsRepository {
     /**
      * 用 root 跑一句命令，带超时。
      *
-     * 以前没有超时：root 管理器弹出授权框而用户不响应时 su 会一直挂着，
-     * load() 的 IO 协程永久阻塞，日志页卡在 loading=true，点刷新也没反应。
+     * 超时时销毁进程并关闭流，让阻塞在管道读的线程立即退出，
+     * 避免读线程和 su 子进程泄漏。
      */
     private fun suExec(cmd: String, timeoutSec: Long = 8L): String? = runCatching {
         val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
-        val reader = p.inputStream.bufferedReader()
-        val text = StringBuilder()
-        val done = java.util.concurrent.atomic.AtomicBoolean(false)
-        val t = Thread {
-            try {
-                text.append(reader.readText())
-            } catch (ignored: Throwable) {
-            } finally {
-                done.set(true)
+        val out = StringBuilder()
+        try {
+            p.inputStream.use { input ->
+                val reader = input.bufferedReader()
+                val done = java.util.concurrent.atomic.AtomicBoolean(false)
+                val t = Thread {
+                    try {
+                        reader.forEachLine { out.appendLine(it) }
+                    } catch (ignored: Throwable) {
+                    } finally {
+                        done.set(true)
+                    }
+                }
+                t.isDaemon = true
+                t.start()
+                val finished = p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)
+                if (!finished) {
+                    // 超时：先销毁进程，再关闭流。关闭流会让 readLine 抛异常、
+                    // 读线程退出，不会残留。
+                    runCatching { p.destroyForcibly() }
+                }
+                // 给读线程一点时间消化已读内容并退出
+                runCatching { p.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                // 关闭流（上面的 use 块结束时会关闭），触发读线程退出
             }
-        }
-        t.isDaemon = true
-        t.start()
-        val deadline = System.currentTimeMillis() + timeoutSec * 1000
-        while (!done.get() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50)
-        }
-        if (!done.get()) {
-            // 超时：杀掉 su，避免进程泄漏
+        } finally {
             runCatching { p.destroyForcibly() }
-            t.interrupt()
-            return null
         }
-        runCatching { p.waitFor() }
-        text.toString().ifBlank { null }
+        out.toString().ifBlank { null }
     }.getOrNull()
 
     /** 用 root 读一个文件；失败返回 null。 */
@@ -81,9 +85,7 @@ object LogsRepository {
     /**
      * 用 root 列出所有目标 App 的日志文件。
      *
-     * 之前只扫 /data_mirror 一条前缀，而清空走的是三条候选路径，
-     * 读写不对称：落在 /data/user/0 的设备上列表恒空、但"清空"却能成功。
-     * 现在三条前缀都扫。
+     * 三条前缀都扫，与 clear 的候选路径对齐，避免读写不对称。
      */
     private fun listLogFiles(): List<String> = runCatching {
         val cmd = listOf(
@@ -135,10 +137,13 @@ object LogsRepository {
     /** 清空某个 App 的日志文件。 */
     suspend fun clear(packageName: String): Boolean = withContext(Dispatchers.IO) {
         candidateLogPaths(packageName).any { path ->
-            // 走带超时的 suExec：授权框不响应时不至于把 IO 线程永久挂住
-            suExec(": > '$path' 2>/dev/null || true") != null ||
-                runCatching { java.io.File(path).let { !it.exists() || it.length() == 0L } }
-                    .getOrDefault(false)
+            runCatching {
+                val p = ProcessBuilder("su", "-c", ": > '$path' 2>/dev/null").start()
+                p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)
+                val ok = !p.isAlive && p.exitValue() == 0
+                if (!ok) runCatching { p.destroyForcibly() }
+                ok
+            }.getOrDefault(false)
         }
     }
 }

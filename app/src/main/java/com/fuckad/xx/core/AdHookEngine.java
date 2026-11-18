@@ -86,10 +86,10 @@ public final class AdHookEngine {
     private static final java.util.Map<Class<?>, java.lang.ref.WeakReference<Object>> sRealArgByType =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Class<?>, java.lang.ref.WeakReference<Object>>());
     private static final java.util.Map<Class<?>, Method> sRewardMethods = new java.util.HashMap<>();
+    /** 每个奖励方法对应的 SDK 名，fireLastClose 补发时用它记账，和 deliver 的记账键同构，避免双发。 */
+    private static final java.util.Map<Class<?>, String> sRewardSdk = new java.util.HashMap<>();
     private static final java.util.Set<Class<?>> sCtorHooked = new java.util.HashSet<>();
     private static volatile long sLastFireAt;
-    /** 广告真正开始展示的时间（onAdShow 这类展示回调），自动关闭用它算延迟。 */
-    private static volatile long sLastShowAt;
 
     /**
      * 关闭广告页之前调用：让 SDK 走一次 onAdClose/onVideoComplete，奖励才有机会发出去。
@@ -110,13 +110,17 @@ public final class AdHookEngine {
 
         // 先补一次奖励：CSJ 的 onRewardVerify(true,1,...) / GDT 的 onReward(Map)
         Method reward;
+        String rewardSdk;
         synchronized (sRewardMethods) {
             reward = sRewardMethods.get(target.getClass());
+            rewardSdk = sRewardSdk.get(target.getClass());
         }
         if (reward != null) {
+            // sdk 命名空间必须和 deliver() 里一致，否则两处记账互不命中、导致双发
+            final String sdk = rewardSdk != null ? rewardSdk : "close";
             final String methodKey = keyOf(reward);
             // 真实奖励已经到账（本会话同一方法已记账）就不再补，避免双发
-            boolean alreadyDone = !RewardLedger.tryInject(target, "close", methodKey, false);
+            boolean alreadyDone = !RewardLedger.tryInject(target, sdk, methodKey, false);
             if (alreadyDone) {
                 if (Logs.isEnabled()) {
                     Logs.d("关闭前跳过补发：本会话已发放 " + reward.getName());
@@ -141,10 +145,10 @@ public final class AdHookEngine {
                                 + (synthetic ? "（构造参数）" : ""));
                         fired = true;
                     } else {
-                        RewardLedger.forget(target, "close", methodKey);
+                        RewardLedger.forget(target, sdk, methodKey);
                     }
                 } catch (Throwable t) {
-                    RewardLedger.forget(target, "close", methodKey);
+                    RewardLedger.forget(target, sdk, methodKey);
                     Logs.w("关闭前补发奖励失败: " + t);
                 }
             }
@@ -718,7 +722,7 @@ public final class AdHookEngine {
         return false;
     }
 
-    private void rememberRewardMethod(Method method) {
+    private void rememberRewardMethod(Method method, String sdk) {
         String name = method.getName();
         if (!name.equals("onRewardVerify") && !name.equals("onRewardArrived")
                 && !name.equals("onReward") && !name.equals("onRewardSuccess")
@@ -732,6 +736,7 @@ public final class AdHookEngine {
             Method old = sRewardMethods.get(method.getDeclaringClass());
             if (old == null || hasBoolean) {
                 sRewardMethods.put(method.getDeclaringClass(), method);
+                sRewardSdk.put(method.getDeclaringClass(), sdk == null ? "close" : sdk);
             }
         }
     }
@@ -850,7 +855,7 @@ public final class AdHookEngine {
                         }
                     });
             hooked.put(key, Boolean.TRUE);
-            rememberRewardMethod(method);
+            rememberRewardMethod(method, rule.sdk);
             captureInstances(method.getDeclaringClass());
             Logs.i("hook 奖励回调 " + key + " [" + rule.sdk + "]");
             return true;
@@ -890,31 +895,7 @@ public final class AdHookEngine {
         }
     }
 
-    /** 展示回调触发补发前，至少等这么久，让真实奖励回调先到手。 */
-    private static final long MIN_SHOW_WAIT_MS = 1500L;
 
-    /**
-     * 该规则对应的奖励方法在本轮广告会话里是否已经收到过真实回调。
-     *
-     * <p>以前只做 containsKey，key 是方法签名、永不清除，等于「这个进程里曾经收到过一次
-     * 真实奖励」→ 之后每一轮展示补发都被跳过，表现为「用一会儿就不发奖了」。
-     * 现在按 会话代次 + TTL 判断，只认本轮。</p>
-     */
-    private boolean hasRealRewardArgs(Rules.Rule rule, Object self) {
-        if (self == null) return false;
-        String name = rule.primaryRewardName();
-        if (name == null) return false;
-        final int session = RewardLedger.sessionOfPublic(self);
-        final long now = System.currentTimeMillis();
-        for (Method m : methodsFor(self.getClass(), name)) {
-            RealArgs real = sRealRewardArgs.get(keyOf(m));
-            if (real == null) continue;
-            if (real.session != session) continue;
-            if (now - real.at > REAL_ARGS_TTL_MS) continue;
-            return true;
-        }
-        return false;
-    }
 
 
     /**
@@ -1127,18 +1108,14 @@ public final class AdHookEngine {
                             // 触发方法里的真实参数（placement id / ATAdInfo 等）留给补发复用
                             final Object[] triggerArgs = toArray(chain.getArgs());
                             if (start) {
-                                sLastShowAt = System.currentTimeMillis();
                                 // 新一轮广告展示：让上一轮的去重记账过期
                                 final int session = RewardLedger.beginSession(self);
                                 // 展示类回调：按设置决定补发时机，默认立即（和 1.0 一致）
                                 // 展示回调一进来就立即补发，不强制延迟。
                                 //
                                 // 老版本（com.fuckad.xx 5.87）这里 rewardDelayMs 默认 0，
-                                // onADShow 一触发就 deliver()。之前加了 MIN_SHOW_WAIT_MS=1500
-                                // 强制等 1500ms，结果对 TopOn 聚合 + 优量汇源的这类游戏是致命的：
-                                // onADShow 之后 42ms 内 GDT 就 onError(109502 填充受限)，
-                                // 广告状态机已经死了，1500ms 后再补发到一具尸体上，奖励自然不到账。
                                 // 老版能到账就是因为 0ms 立刻补，赶在 GDT 报错之前。
+                                // 展示回调一进来就补发，不强制延迟。
                                 final long delay = Config.rewardDelayMs();
                                 if (Logs.isEnabled()) {
                                     Logs.d("展示类回调，补发延迟 " + delay + "ms: " + key);
