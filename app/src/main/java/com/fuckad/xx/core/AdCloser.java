@@ -150,7 +150,9 @@ public final class AdCloser {
                 Activity activity = (Activity) target;
                 if (!activity.isFinishing()) {
                     Logs.raw("自动关闭广告页 " + name);
-                    // 先替 SDK 收尾（onAdClose 等），奖励链路才有机会走完
+                    // 恢复老版本（5.87）行为：先 fireLastClose 补发，再 finish。
+                    // 之前试的 moveTaskToBack 退后台方案没解决到账问题，
+                    // 老版本能到账靠的是"展示回调立即补发"，跟关闭方式无关。
                     final boolean fired = AdHookEngine.fireLastClose();
                     if (fired) {
                         mainHandler().postDelayed(new Runnable() {
@@ -170,8 +172,6 @@ public final class AdCloser {
                 Dialog dialog = (Dialog) target;
                 if (dialog.isShowing()) {
                     Logs.raw("自动关闭广告弹窗 " + name);
-                    // 弹窗形式的广告同样要先替 SDK 收尾，否则奖励不会发
-                    AdHookEngine.fireLastClose();
                     dialog.dismiss();
                 }
             }

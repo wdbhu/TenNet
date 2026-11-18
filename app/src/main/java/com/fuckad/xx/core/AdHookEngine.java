@@ -1131,34 +1131,33 @@ public final class AdHookEngine {
                                 // 新一轮广告展示：让上一轮的去重记账过期
                                 final int session = RewardLedger.beginSession(self);
                                 // 展示类回调：按设置决定补发时机，默认立即（和 1.0 一致）
-                                int baseDelay = Config.rewardDelayMs();
-                                // 百度在广告页还开着时补发会触发 App 原生崩溃，
-                                // 自动关广告开启时等到关闭之后再补。
-                                if ("BAIDU".equals(rule.sdk) && Config.autoClose()) {
-                                    baseDelay = Math.max(baseDelay, Config.autoCloseDelayMs() + 800);
-                                }
-                                final long delay = Math.max((long) baseDelay, MIN_SHOW_WAIT_MS);
+                                // 展示回调一进来就立即补发，不强制延迟。
+                                //
+                                // 老版本（com.fuckad.xx 5.87）这里 rewardDelayMs 默认 0，
+                                // onADShow 一触发就 deliver()。之前加了 MIN_SHOW_WAIT_MS=1500
+                                // 强制等 1500ms，结果对 TopOn 聚合 + 优量汇源的这类游戏是致命的：
+                                // onADShow 之后 42ms 内 GDT 就 onError(109502 填充受限)，
+                                // 广告状态机已经死了，1500ms 后再补发到一具尸体上，奖励自然不到账。
+                                // 老版能到账就是因为 0ms 立刻补，赶在 GDT 报错之前。
+                                final long delay = Config.rewardDelayMs();
                                 if (Logs.isEnabled()) {
-                                    Logs.d("展示类回调，等 " + delay + "ms 真实奖励回调再决定补发: " + key);
+                                    Logs.d("展示类回调，补发延迟 " + delay + "ms: " + key);
                                 }
-                                mainHandler().postDelayed(new Runnable() {
+                                Runnable fire = new Runnable() {
                                     @Override
                                     public void run() {
                                         if (!RewardLedger.isSession(self, session)) {
                                             if (Logs.isEnabled()) Logs.d("跳过过期补发: " + key);
                                             return;
                                         }
-                                        // 真实奖励回调已经来过（正常看完/SDK 自己发了）：
-                                        // 不再补发，避免重复发奖，也避免用构造参数去碰 App 的字段。
-                                        if (hasRealRewardArgs(rule, self)) {
-                                            if (Logs.isEnabled()) {
-                                                Logs.d("真实奖励回调已发生，跳过展示补发: " + key);
-                                            }
-                                            return;
-                                        }
                                         deliver(rule, self, triggerArgs);
                                     }
-                                }, delay);
+                                };
+                                if (delay <= 0) {
+                                    fire.run();
+                                } else {
+                                    mainHandler().postDelayed(fire, delay);
+                                }
                                 return chain.proceed();
                             }
                             if (liquidClose) {
@@ -1291,27 +1290,13 @@ public final class AdHookEngine {
         // 但实际构造可能返回 null —— 比如 anythink 的 ATAdInfo，
         // 目标 App 的 onReward(null) 会直接 NPE（getRequestId() on null），
         // 奖励发不出去。这里改成：先把参数真的造一遍，有 null 就换下一个候选。
-        /*
-         * 同名重载里优先挑「参数最多」的那个。
-         *
-         * 实测：优量汇的 GDTATRewardedVideoAdapter$b 同时有 onReward() 和
-         * onReward(Map)，无参版本往往只是个通知壳、只打点不往上传递，
-         * 真正把奖励交给聚合层和 App 的是带 Map 的那个。而 getDeclaredMethods()
-         * 的顺序不确定，之前挑中无参版本就会出现「日志说补发了、游戏没到账」。
-         * 快手那边是 onRewardVerify() 只有一个重载，所以一直正常。
-         */
-        java.util.List<Method> ordered = new java.util.ArrayList<>(candidates);
-        java.util.Collections.sort(ordered, new java.util.Comparator<Method>() {
-            @Override
-            public int compare(Method a, Method b) {
-                return b.getParameterCount() - a.getParameterCount();
-            }
-        });
-
+        // 老版本（com.fuckad.xx 5.87）就是按 methodsFor 返回顺序取第一个 allProvideable，
+        // 不做任何重载排序。之前加的"参数最多优先"排序可能反而挑错了方法，
+        // 这里恢复老版行为。
         Method target = null;
         Object[] builtArgs = null;
         String firstBad = null;
-        for (Method method : ordered) {
+        for (Method method : candidates) {
             Class<?>[] types = method.getParameterTypes();
             if (!allProvideable(types)) {
                 if (firstBad == null) firstBad = badParam(types);

@@ -69,31 +69,38 @@ object ScopeController {
     fun ready(): Boolean = XposedStatusProvider.service() != null || rootOk()
 
     /**
-     * 当前勾选的 App 集合。
+     * 当前勾选的 App 集合 —— 只以 scope_apps 名单为准。
      *
-     * 取"名单"和"LSPosed scope 表"的交集：
-     *  - 名单（scope_apps）决定 hook 侧是否真的装 hook
-     *  - scope 表决定 lspd 是否把模块注入到该 App 的进程
-     * 两边都满足才真正生效，界面必须显示这个交集，否则会骗用户。
+     * 为什么不掺和 LSPosed 的 scope 表：
      *
-     * 例外：没有 root 读不到 scope 表时，只能退回只信名单。
+     * lspd 是常驻进程，以 WAL 模式持有 modules_config.db。root 直写虽然
+     * 能进 WAL，但 lspd 内存里的 scope 是权威状态，它 checkpoint 时会把
+     * 内存状态写回，覆盖外部插入 —— 造成「直写返回成功、界面显示已勾选、
+     * 实际库里是空」的三方不一致（实测：db 里 TenNet scope 为空，
+     * service.scope 却返回 2 个）。
+     *
+     * 而 hook 侧真正读的是 Config.isAppEnabled() → scope_apps 名单。
+     * 界面必须和这个数据源一致，否则数字就是假的。
+     *
+     * scope 表仍然要写（root 直写保留），那是给 lspd 下次重启后加载用的；
+     * 但「当前勾选状态」只看名单。
      */
     fun currentScope(ctx: Context? = null): Set<String> {
-        // 真正生效需要两个条件同时满足：
-        //   1) lspd 把模块注入到该 App（LSPosed 的 scope 表）
-        //   2) hook 侧 Config.isAppEnabled() 放行（scope_apps 名单）
-        // 以前这里直接返回 scope 表，只要用户在 LSPosed 管理器里勾了，
-        // 界面就显示已启用，但 scope_apps 里没有 → 一行 hook 都不装。
-        val injected = runCatching { XposedStatusProvider.service()?.scope?.toSet() }
-            .getOrNull()?.takeIf { it.isNotEmpty() }
-        val listed = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
+        val listed = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS) ?: emptySet()
+        if (listed.isEmpty()) return listed
 
-        return when {
-            injected != null && listed != null -> injected intersect listed
-            listed != null -> listed          // 服务未连，只能信名单
-            injected != null -> injected      // 名单未配置（旧版本升级），按注入范围显示
-            else -> emptySet()
-        }
+        // 过滤掉已卸载的包：勾选过的应用卸载后，名单里会留下脏数据，
+        // 首页「已启用」会虚高（实测：残留 2 个已卸载包，显示 2 而应用页全没勾）。
+        // 有 Context 时按已安装集合过滤；没有 Context 就原样返回（只影响显示）。
+        val c = ctx
+        if (c == null) return listed
+        return runCatching {
+            val pm = c.packageManager
+            val installed = pm.getInstalledPackages(0)
+                .map { it.packageName }
+                .toHashSet()
+            listed.filterTo(HashSet()) { it in installed }
+        }.getOrDefault(listed)
     }
 
     /**
@@ -107,8 +114,6 @@ object ScopeController {
      */
     fun add(ctx: Context, pkg: String, onDone: (Boolean) -> Unit = {}) {
         // 先记下原名单，授权失败时回滚。
-        // 以前先写名单再请求授权，用户点「拒绝」后名单里那条不会撤销，
-        // 该 App 一旦被别的方式加进 LSPosed scope 就会被 hook，而界面显示未勾选。
         val before = TunNetPrefs.readStringSet(Config.KEY_SCOPE_APPS)
 
         val svc = XposedStatusProvider.service()
@@ -179,7 +184,6 @@ object ScopeController {
             onDone(true)
             return
         }
-        // removeScope 不弹窗，立即把该 App 从注入范围移除
         runCatching {
             if (pkg in svc.scope) svc.removeScope(listOf(pkg))
             onDone(true)
