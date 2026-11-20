@@ -41,6 +41,15 @@ public final class AdHookEngine {
 
     /** 最近一次广告展示的 adapter 实例，用来在自动关闭前替 SDK 触发结束回调。 */
     private static volatile java.lang.ref.WeakReference<Object> sLastAdTargetRef;
+    /**
+     * 本轮广告里出现过的所有监听对象。
+     *
+     * <p>聚合 SDK 是分层回调：底层 SDK（快手/穿山甲）→ 聚合适配器（AnyThink）→ App 自己的监听器。
+     * 只记住「最后一个」对象时，App 层的 onRewardedVideoAdPlayEnd 永远补不到，
+     * App 就认为视频没看完而不发奖。这里把本轮出现过的一层层的对象都记下来。</p>
+     */
+    private static final java.util.List<java.lang.ref.WeakReference<Object>> sSessionTargets =
+            new java.util.ArrayList<>();
     /** 最近一次补发奖励的时间，3 秒内不重复补，避免关闭+SDK 回调双发。 */
     private static volatile long sLastRewardAt;
     private static volatile long sLastAdAt;
@@ -101,6 +110,15 @@ public final class AdHookEngine {
      */
     public static boolean fireLastClose() {
         Object target = sLastAdTargetRef == null ? null : sLastAdTargetRef.get();
+        // 先伪造观看时长：有些 App 把「播了多少秒」上报给服务端做发奖判定，
+        // 只补回调不改时长，服务端仍然判「没看完」。
+        // 发版默认关闭：伪造播放时长会影响正常应用，调试时再打开
+        // if (Config.debug()) {
+        //     fakePlayDuration(target);
+        //     for (Object other : sessionTargets()) {
+        //         if (other != target) fakePlayDuration(other);
+        //     }
+        // }
         if (target == null) return false;
         long now = System.currentTimeMillis();
         if (now - sLastAdAt > 20_000L) return false;
@@ -153,12 +171,7 @@ public final class AdHookEngine {
                 }
             }
         }
-        java.util.List<Method> closes;
-        synchronized (sCloseMethods) {
-            closes = sCloseMethods.get(target.getClass());
-            if (closes == null) closes = null;
-            else closes = new java.util.ArrayList<>(closes);
-        }
+        java.util.List<Method> closes = closeMethodsFor(target);
         if (closes == null || closes.isEmpty()) return fired;
 
         /*
@@ -180,7 +193,125 @@ public final class AdHookEngine {
             if (isCompleteMethod(close.getName())) continue;
             if (invokeClose(close, target)) any = true;
         }
+
+        /*
+         * 聚合 SDK 的分层回调：上面只处理了「最后那个对象」。
+         * App 自己的监听器（例如 TaKuReward$loadAd$1$1）在另一层，
+         * 它的 onRewardedVideoAdPlayEnd 才是 App 判定「看完视频」的依据。
+         * 这里对本轮出现过的其余层只补「播放完成」类回调，
+         * 不碰奖励和关闭，避免重复发奖或重复关页面。
+         */
+        for (Object other : sessionTargets()) {
+            if (other == null || other == target) continue;
+            java.util.List<Method> list = closeMethodsFor(other);
+            if (list == null) continue;
+            for (Method m : list) {
+                if (!isCompleteMethod(m.getName())) continue;
+                if (invokeClose(m, other)) any = true;
+            }
+        }
         return fired || any;
+    }
+
+    /**
+     * 伪造「观看开始时间」，让 App 上报的观看时长看起来足够长。
+     *
+     * <p>有些 App（聚合 + H5 那类）发奖不看客户端回调，而是把
+     * 「播放开始时间 / 当前时间」上报给服务端，由服务端算时长决定发不发奖。
+     * 只补回调不改这个时间，服务端永远判「没看完」。</p>
+     *
+     * <p>这里沿 this$0 找到外层对象（真实字段常挂在外部类上），
+     * 把这个对象里的 playStartTime 之类往前挪一段。</p>
+     */
+    private static void fakePlayDuration(Object target) {
+        if (target == null) return;
+        java.util.Set<Object> seen =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Object, Boolean>());
+        fakePlayDuration(target, seen, 0);
+    }
+
+    private static void fakePlayDuration(Object obj, java.util.Set<Object> seen, int depth) {
+        if (obj == null || depth > 2 || !seen.add(obj)) return;
+        long now = System.currentTimeMillis();
+        for (Class<?> type = obj.getClass(); type != null && type != Object.class;
+                type = type.getSuperclass()) {
+            java.lang.reflect.Field[] fields;
+            try {
+                fields = type.getDeclaredFields();
+            } catch (Throwable t) {
+                continue;
+            }
+            for (java.lang.reflect.Field f : fields) {
+                try {
+                    Class<?> ft = f.getType();
+                    if (ft == long.class || ft == java.lang.Long.class) {
+                        String n = f.getName().toLowerCase();
+                        boolean looksLikeStart = n.contains("playstart")
+                                || n.contains("videostart")
+                                || n.contains("watchstart")
+                                || n.contains("playstarttime");
+                        if (!looksLikeStart) continue;
+                        f.setAccessible(true);
+                        Object cur = f.get(obj);
+                        long v = cur instanceof Long ? (Long) cur : 0L;
+                        // 只动「刚刚」的时间戳，避免误改无关时间
+                        if (v <= 0 || Math.abs(now - v) > 10 * 60 * 1000L) continue;
+                        f.set(obj, now - 35_000L);
+                        Logs.i("已伪造观看时长: " + type.getSimpleName() + "."
+                                + f.getName() + " -> 往前 35s");
+                    } else if (!ft.isPrimitive() && depth < 2) {
+                        String fn = f.getName();
+                        if (!fn.startsWith("this$") && !fn.startsWith("val$")) continue;
+                        f.setAccessible(true);
+                        Object inner = f.get(obj);
+                        if (inner != null) fakePlayDuration(inner, seen, depth + 1);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /** 登记本轮广告出现过的监听对象（去重）。 */
+    private static void rememberSessionTarget(Object self) {
+        if (self == null) return;
+        synchronized (sSessionTargets) {
+            for (java.util.Iterator<java.lang.ref.WeakReference<Object>> it =
+                    sSessionTargets.iterator(); it.hasNext(); ) {
+                Object old = it.next().get();
+                if (old == null) {
+                    it.remove();
+                } else if (old == self) {
+                    return;
+                }
+            }
+            sSessionTargets.add(new java.lang.ref.WeakReference<>(self));
+            if (sSessionTargets.size() > 32) sSessionTargets.remove(0);
+        }
+    }
+
+    /** 新一轮广告展示开始时清空上一轮的登记。 */
+    private static void clearSessionTargets() {
+        synchronized (sSessionTargets) {
+            sSessionTargets.clear();
+        }
+    }
+
+    /** 本轮出现过的监听对象快照。 */
+    private static java.util.List<Object> sessionTargets() {
+        java.util.List<Object> out = new java.util.ArrayList<>();
+        synchronized (sSessionTargets) {
+            for (java.util.Iterator<java.lang.ref.WeakReference<Object>> it =
+                    sSessionTargets.iterator(); it.hasNext(); ) {
+                Object o = it.next().get();
+                if (o == null) {
+                    it.remove();
+                } else {
+                    out.add(o);
+                }
+            }
+        }
+        return out;
     }
 
     /** 是否是「视频播放完成」这类回调（游戏发奖的前提条件）。 */
@@ -191,11 +322,103 @@ public final class AdHookEngine {
                 || name.contains("PlayEnd");
     }
 
-    /** 调一个结束回调，失败只记日志。 */
+    /**
+     * 取出这个广告对象可用的结束回调。
+     *
+     * <p>注册时 sCloseMethods 的 key 是 {@code method.getDeclaringClass()}，
+     * 也就是「声明方法的接口」；而这里拿到的 target 是「运行时实现类」。
+     * 两者通常不相等（例如声明类是 KsRewardVideoAd$RewardAdInteractionListener，
+     * 运行时是 KsRewardVideoAdControl$1 这个匿名内部类），
+     * 直接 get(target.getClass()) 永远查不到，结束回调一次都不会补发，
+     * App 侧因此认为「没看完视频」而不给奖励。</p>
+     *
+     * <p>这里按 target 的父类和全部接口（含接口的父接口）逐个匹配。</p>
+     */
+    private static java.util.List<Method> closeMethodsFor(Object target) {
+        if (target == null) return null;
+        java.util.LinkedHashMap<String, Method> merged = new java.util.LinkedHashMap<>();
+        java.util.Set<Class<?>> seen = new java.util.HashSet<>();
+        java.util.ArrayDeque<Class<?>> queue = new java.util.ArrayDeque<>();
+        queue.add(target.getClass());
+        synchronized (sCloseMethods) {
+            while (!queue.isEmpty()) {
+                Class<?> type = queue.poll();
+                if (type == null || !seen.add(type)) continue;
+                if (type != Object.class) {
+                    java.util.List<Method> list = sCloseMethods.get(type);
+                    if (list != null) {
+                        for (Method m : list) merged.putIfAbsent(m.getName(), m);
+                    }
+                }
+                Class<?> parent = type.getSuperclass();
+                if (parent != null) queue.add(parent);
+                for (Class<?> itf : type.getInterfaces()) queue.add(itf);
+            }
+        }
+        if (merged.isEmpty()) return null;
+        java.util.List<Method> out = new java.util.ArrayList<>(merged.values());
+        // 重新按「完成 → 关闭」排序，合并后顺序不可信
+        java.util.Collections.sort(out, new java.util.Comparator<Method>() {
+            @Override
+            public int compare(Method a, Method b) {
+                return closeRank(a.getName()) - closeRank(b.getName());
+            }
+        });
+        return out;
+    }
+
+    /**
+     * 从本轮真实回调里找同类型（或父类型）的对象。
+     *
+     * <p>ATAdInfo 这类聚合 SDK 的 final 对象构造不出非空实例，
+     * 但真实回调一定带着它；补发时复用它，App 才不会读到 null。</p>
+     */
+    private static Object realArgFor(Class<?> type) {
+        if (type == null) return null;
+        if (type.isPrimitive()) return null;
+        java.lang.ref.WeakReference<Object> ref = sRealArgByType.get(type);
+        Object direct = ref == null ? null : ref.get();
+        if (direct != null) return direct;
+        synchronized (sRealArgByType) {
+            for (java.util.Map.Entry<Class<?>, java.lang.ref.WeakReference<Object>> e
+                    : sRealArgByType.entrySet()) {
+                if (!type.isAssignableFrom(e.getKey())) continue;
+                Object value = e.getValue() == null ? null : e.getValue().get();
+                if (value != null) return value;
+            }
+        }
+        return null;
+    }
+
+    /** 构造回调实参：真实对象 > 触发回调里的实参 > 默认值。 */
+    private static Object[] buildArgsPreferReal(Class<?>[] types, Object[] triggerArgs) {
+        if (types == null || types.length == 0) return new Object[0];
+        Object[] out = new Object[types.length];
+        for (int i = 0; i < types.length; i++) {
+            Class<?> type = types[i];
+            Object value = null;
+            if (triggerArgs != null && !type.isPrimitive()) {
+                for (Object arg : triggerArgs) {
+                    if (arg != null && type.isInstance(arg)) {
+                        value = arg;
+                        break;
+                    }
+                }
+            }
+            if (value == null) value = realArgFor(type);
+            if (value == null) value = ArgFixer.defaultValue(type);
+            out[i] = value;
+        }
+        return out;
+    }
+
+    /** 调一个结束回调，失败只记日志。带参数的方法用 ArgFixer 构造入参。 */
     private static boolean invokeClose(Method close, Object target) {
         try {
             close.setAccessible(true);
-            close.invoke(target);
+            Class<?>[] types = close.getParameterTypes();
+            Object[] args = buildArgsPreferReal(types, null);
+            close.invoke(target, args);
             Logs.i("关闭前替 SDK 触发结束回调 " + close.getName()
                     + " @ " + target.getClass().getName());
             return true;
@@ -759,6 +982,7 @@ public final class AdHookEngine {
                             if (self != null) {
                                 sLastAdTargetRef = new java.lang.ref.WeakReference<>(self);
                                 sLastAdAt = System.currentTimeMillis();
+                                rememberSessionTarget(self);
                                 if (Logs.isEnabled()) {
                                     Logs.d("捕获广告实例 " + self.getClass().getName());
                                 }
@@ -918,7 +1142,8 @@ public final class AdHookEngine {
     /** 关闭回调优先级：数字越小越先调用。 */
     private static int closeRank(String name) {
         if (name.contains("onAdClose") || name.contains("onADClose")) return 0;
-        if (name.contains("onVideoComplete") || name.contains("onVideoEnd")) return 1;
+        if (name.contains("onVideoComplete") || name.contains("onVideoEnd")
+                || name.contains("PlayEnd") || name.contains("onVideoSkipToEnd")) return 1;
         if (name.contains("onSkipped") || name.contains("onAdDismiss")) return 2;
         return 3;
     }
@@ -926,7 +1151,10 @@ public final class AdHookEngine {
     private static boolean isCloseMethod(String key) {
         return key.contains("onAdClose") || key.contains("onADClose")
                 || key.contains("onSkippedVideo") || key.contains("onVideoComplete")
-                || key.contains("onAdDismiss") || key.contains("onRewardVerify");
+                || key.contains("onAdDismiss") || key.contains("onRewardVerify")
+                // 播放结束：App 用它给「是否看完」置位，缺了它就会被判成没看完整
+                || key.contains("PlayEnd") || key.contains("onVideoEnd")
+                || key.contains("onVideoSkipToEnd");
     }
 
     /**
@@ -1065,7 +1293,7 @@ public final class AdHookEngine {
         // 必须在关闭前先把标志置 true，否则 JS 收到 onClose(reward=false)。
         final boolean liquidClose = "LIQUID".equals(rule.sdk) && key.contains("onAdClose");
         // 记下可以作为"结束"触发的方法，自动关闭广告时用它替 SDK 收尾
-        if (isCloseMethod(key) && method.getParameterTypes().length == 0) {
+        if (isCloseMethod(key)) {
             synchronized (sCloseMethods) {
                 java.util.List<Method> list = sCloseMethods.get(method.getDeclaringClass());
                 if (list == null) {
@@ -1104,11 +1332,27 @@ public final class AdHookEngine {
                             if (self != null) {
                                 sLastAdTargetRef = new java.lang.ref.WeakReference<>(self);
                                 sLastAdAt = System.currentTimeMillis();
+                                rememberSessionTarget(self);
                             }
                             // 触发方法里的真实参数（placement id / ATAdInfo 等）留给补发复用
                             final Object[] triggerArgs = toArray(chain.getArgs());
+                            // 展示/结束回调里的真实对象（尤其 ATAdInfo）留一份。
+                            // 自动关闭时回调已经离开，构造不出同类型的非空实例，
+                            // 只能复用这里存下的真实对象，否则 App 收到 null 会
+                            // 当成“没看完”或直接空指针，奖励就发不出来。
+                            if (triggerArgs != null) {
+                                for (Object arg : triggerArgs) {
+                                    if (arg != null) {
+                                        sRealArgByType.put(arg.getClass(),
+                                                new java.lang.ref.WeakReference<>(arg));
+                                    }
+                                }
+                            }
                             if (start) {
-                                // 新一轮广告展示：让上一轮的去重记账过期
+                                // 新一轮广告展示：让上一轮的去重记账过期，
+                                // 并清空上一轮登记的监听对象（否则旧对象会被当成同一轮去补发）
+                                clearSessionTargets();
+                                rememberSessionTarget(self);
                                 final int session = RewardLedger.beginSession(self);
                                 // 展示类回调：按设置决定补发时机，默认立即（和 1.0 一致）
                                 // 展示回调一进来就立即补发，不强制延迟。
@@ -1288,6 +1532,13 @@ public final class AdHookEngine {
                 probe = ArgFixer.buildRewardArgs(types, triggerArgs);
             }
             if (probe == null) continue;
+            // 构造不出来的对象参数，换成本轮真实回调里的同一个对象
+            for (int i = 0; i < probe.length; i++) {
+                if (probe[i] == null && !types[i].isPrimitive()) {
+                    Object real = realArgFor(types[i]);
+                    if (real != null) probe[i] = real;
+                }
+            }
             boolean hasNull = false;
             for (int i = 0; i < probe.length; i++) {
                 if (probe[i] == null && !types[i].isPrimitive()) {
@@ -1431,14 +1682,15 @@ public final class AdHookEngine {
 
     private static boolean allProvideable(Class<?>[] types) {
         for (Class<?> type : types) {
-            if (!ArgFixer.canProvide(type)) return false;
+            // 能复用本轮真实回调对象时，即使构造不出来也算可用
+            if (!ArgFixer.canProvide(type) && realArgFor(type) == null) return false;
         }
         return true;
     }
 
     private static String badParam(Class<?>[] types) {
         for (Class<?> type : types) {
-            if (!ArgFixer.canProvide(type)) return type.getName();
+            if (!ArgFixer.canProvide(type) && realArgFor(type) == null) return type.getName();
         }
         return "?";
     }

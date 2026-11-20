@@ -11,6 +11,11 @@ import com.fuckad.xx.core.AdHookEngine;
 import com.fuckad.xx.core.AppCtx;
 import com.fuckad.xx.core.RiskHookEngine;
 import com.fuckad.xx.core.AdCloser;
+import com.fuckad.xx.core.WebSniffer;
+import com.fuckad.xx.core.HttpSniffer;
+import com.fuckad.xx.core.RewardBypass;
+import com.fuckad.xx.core.PackageSpoof;
+import com.fuckad.xx.core.UnityBridgeProbe;
 import com.fuckad.xx.ui.Toaster;
 
 import java.lang.reflect.Method;
@@ -242,6 +247,36 @@ public final class Main extends XposedModule {
                             }
                         } catch (Throwable t) {
                             Logs.e("自动关广告安装失败", t);
+                        }
+                        try {
+                            // 发版默认关闭: WebSniffer.install(Main.this, classLoader);
+                        } catch (Throwable t) {
+                            Logs.e("请求嗅探安装失败", t);
+                        }
+                        try {
+                            // 发版默认关闭: HttpSniffer.install(Main.this, classLoader);
+                        } catch (Throwable t) {
+                            Logs.e("OkHttp 嗅探安装失败", t);
+                        }
+                        try {
+                            // 发版默认关闭: HttpSniffer.installReportHook(Main.this, classLoader);
+                        } catch (Throwable t) {
+                            Logs.e("上报参数记录安装失败", t);
+                        }
+                        try {
+                            // 发版默认关闭（调试期实验功能）: RewardBypass.install(Main.this, classLoader);
+                        } catch (Throwable t) {
+                            Logs.e("下载任务绕过安装失败", t);
+                        }
+                        try {
+                            // 发版默认关闭（调试期实验功能）: PackageSpoof.install(Main.this, classLoader);
+                        } catch (Throwable t) {
+                            Logs.e("安装状态伪造失败", t);
+                        }
+                        try {
+                            // 发版默认关闭（调试期实验功能）: UnityBridgeProbe.install(Main.this, classLoader);
+                        } catch (Throwable t) {
+                            Logs.e("Unity 桥诊断安装失败", t);
                         }
                         // hook 已经生效，这时再把 DexKit 慢速索引放到后台补扫，
                         // 不占 App 冷启动的关键路径。
