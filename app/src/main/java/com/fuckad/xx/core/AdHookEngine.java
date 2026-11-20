@@ -127,12 +127,10 @@ public final class AdHookEngine {
         boolean fired = false;
 
         // 先补一次奖励：CSJ 的 onRewardVerify(true,1,...) / GDT 的 onReward(Map)
-        Method reward;
-        String rewardSdk;
-        synchronized (sRewardMethods) {
-            reward = sRewardMethods.get(target.getClass());
-            rewardSdk = sRewardSdk.get(target.getClass());
-        }
+        // 注册用的是声明类（接口），运行期拿到的是匿名实现类，两者不同。
+        // 直接 get(target.getClass()) 永远查不到 —— 关闭前兜底补发会静默失效。
+        Method reward = rewardMethodFor(target);
+        String rewardSdk = rewardSdkFor(target);
         if (reward != null) {
             // sdk 命名空间必须和 deliver() 里一致，否则两处记账互不命中、导致双发
             final String sdk = rewardSdk != null ? rewardSdk : "close";
@@ -310,6 +308,49 @@ public final class AdHookEngine {
                     out.add(o);
                 }
             }
+        }
+        return out;
+    }
+
+    /** 按 target 的类层级 + 全部接口，找已注册的奖励方法。 */
+    private static Method rewardMethodFor(Object target) {
+        if (target == null) return null;
+        for (Class<?> t : classHierarchy(target)) {
+            synchronized (sRewardMethods) {
+                Method m = sRewardMethods.get(t);
+                if (m != null) return m;
+            }
+        }
+        return null;
+    }
+
+    /** 同上，取这个奖励方法对应的 SDK 命名空间。 */
+    private static String rewardSdkFor(Object target) {
+        if (target == null) return null;
+        for (Class<?> t : classHierarchy(target)) {
+            synchronized (sRewardMethods) {
+                if (!sRewardMethods.containsKey(t)) continue;
+                String sdk = sRewardSdk.get(t);
+                if (sdk != null) return sdk;
+            }
+        }
+        return null;
+    }
+
+    /** target 的类、父类、全部接口（含接口的父接口）。 */
+    private static java.util.List<Class<?>> classHierarchy(Object target) {
+        java.util.List<Class<?>> out = new java.util.ArrayList<>();
+        if (target == null) return out;
+        java.util.Set<Class<?>> seen = new java.util.HashSet<>();
+        java.util.ArrayDeque<Class<?>> queue = new java.util.ArrayDeque<>();
+        queue.add(target.getClass());
+        while (!queue.isEmpty()) {
+            Class<?> t = queue.poll();
+            if (t == null || t == Object.class || !seen.add(t)) continue;
+            out.add(t);
+            Class<?> p = t.getSuperclass();
+            if (p != null) queue.add(p);
+            for (Class<?> i : t.getInterfaces()) queue.add(i);
         }
         return out;
     }
