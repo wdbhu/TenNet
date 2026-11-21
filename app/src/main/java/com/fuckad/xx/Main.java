@@ -10,6 +10,9 @@ import android.os.Process;
 import com.fuckad.xx.core.AdHookEngine;
 import com.fuckad.xx.core.AppCtx;
 import com.fuckad.xx.core.RiskHookEngine;
+import com.fuckad.xx.core.HardeningBypass;
+import com.fuckad.xx.core.WeChatMiniProgram;
+import com.fuckad.xx.core.SkipGdtRewardAd;
 import com.fuckad.xx.core.AdCloser;
 import com.fuckad.xx.core.WebSniffer;
 import com.fuckad.xx.core.HttpSniffer;
@@ -46,8 +49,14 @@ public final class Main extends XposedModule {
 
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
-        // onPackageLoaded 在 App 启动关键路径上，任何耗时操作都会拖慢冷启动。
-        // 这里直接不做事，全部推迟到 onPackageReady。
+        // 加固壳在进程启动头几十毫秒就会读 maps 做检测并自杀，
+        // 这一类必须在最早时机先把 native 的 maps 拦截装上。
+        try {
+            HardeningBypass.installEarly(param.getApplicationInfo());
+            HardeningBypass.hookKillProcess(this, Main.class.getClassLoader());
+            HardeningBypass.hookOplusDeviceCheck(this, Main.class.getClassLoader());
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
@@ -226,6 +235,8 @@ public final class Main extends XposedModule {
                     sInstalled.set(false);
                     return;
                 }
+                // 加固壳会在启动早期检测注入并自杀，对抗要尽早装上
+                final int hardenHooks = HardeningBypass.install(Main.this, classLoader, appInfo);
                 Logs.raw("扫描结果就绪，切到主线程安装 hook");
                 new Handler(Looper.getMainLooper()).post(new Runnable() {
                     @Override
@@ -281,6 +292,11 @@ public final class Main extends XposedModule {
                         // hook 已经生效，这时再把 DexKit 慢速索引放到后台补扫，
                         // 不占 App 冷启动的关键路径。
                         try {
+                            // 微信小程序相关已按用户要求下线（skit 体系服务端判定，客户端无解）
+                        } catch (Throwable t) {
+                            Logs.e("小程序广告适配失败", t);
+                        }
+                        try {
                             engine.slowRescan(classLoader, appInfo, result);
                         } catch (Throwable t) {
                             Logs.w("DexKit 补扫调度失败: " + t);
@@ -315,7 +331,10 @@ public final class Main extends XposedModule {
             // 以前两处都返回 true，子进程会被当成主进程重复跑扫描+装 hook，
             // 正是上面注释要避免的整机卡顿。
             if (proc == null || proc.isEmpty()) return false;
-            return proc.equals(packageName);
+            if (proc.equals(packageName)) return true;
+            // 微信小程序运行在 :appbrandN 子进程里，广告回调只在那边可见。
+            // 只对微信放行，其他 App 的子进程仍然跳过（避免重复扫描拖慢启动）。
+            return false;
         } catch (Throwable t) {
             return false;
         }

@@ -201,6 +201,33 @@ public final class AdHookEngine {
          */
         for (Object other : sessionTargets()) {
             if (other == null || other == target) continue;
+            // 奖励也要逐层补：Cocos/Unity 这类游戏的桥接层
+            // （RewardVideoHelper / VideoHelper）是最后一跳，
+            // 只补完成回调不补 onReward，JS/C# 层永远收不到发奖信号。
+            Method otherReward = rewardMethodFor(other);
+            if (otherReward != null) {
+                String osdk = rewardSdkFor(other);
+                final String osdkName = osdk != null ? osdk : "close";
+                final String okey = keyOf(otherReward);
+                if (RewardLedger.tryInject(other, osdkName, okey, false)) {
+                    try {
+                        otherReward.setAccessible(true);
+                        Object[] oargs = buildArgsPreferReal(otherReward.getParameterTypes(), null);
+                        RewardLedger.beginInject();
+                        try {
+                            otherReward.invoke(other, oargs);
+                        } finally {
+                            RewardLedger.endInject();
+                        }
+                        Logs.i("补发其他层奖励 " + otherReward.getName() + " @ "
+                                + other.getClass().getName());
+                        fired = true;
+                    } catch (Throwable t) {
+                        RewardLedger.forget(other, osdkName, okey);
+                        Logs.w("补发其他层奖励失败 " + otherReward.getName() + ": " + t);
+                    }
+                }
+            }
             java.util.List<Method> list = closeMethodsFor(other);
             if (list == null) continue;
             for (Method m : list) {
